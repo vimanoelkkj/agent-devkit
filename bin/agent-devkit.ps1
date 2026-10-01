@@ -27,7 +27,10 @@ param(
     [string]$StateDir = $null,
 
     [Parameter(Mandatory = $false)]
-    [switch]$DryRun
+    [switch]$DryRun,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$NoGitExclude
 )
 
 $ErrorActionPreference = "Stop"
@@ -311,7 +314,7 @@ switch ($Command) {
     }
 
     "sync" {
-        $result = Invoke-DevKitSync -ProjectDir $ProjectDir -Profile $Profile -StateDir $StateDir -Manifest $explicitManifest -DryRun:$DryRun -DevKitRoot $devKitRoot
+        $result = Invoke-DevKitSync -ProjectDir $ProjectDir -Profile $Profile -StateDir $StateDir -Manifest $explicitManifest -DryRun:$DryRun -NoGitExclude:$NoGitExclude -DevKitRoot $devKitRoot
 
         Write-Host "Execution Summary:"
         Write-Host "  Total Files Evaluated: $($result.TotalFiles)"

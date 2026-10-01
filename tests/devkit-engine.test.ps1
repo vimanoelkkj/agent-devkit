@@ -677,6 +677,119 @@ finally {
     Remove-Item -Path $externalStateDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# Test 15: Local Git Isolation via .git/info/exclude
+Write-Host "`nTest 15: Local Git Isolation via .git/info/exclude" -ForegroundColor Yellow
+
+$gitSandbox = Join-Path ([System.IO.Path]::GetTempPath()) "devkit-git-sandbox-$([Guid]::NewGuid().ToString('N'))"
+$gitStateDir = Join-Path ([System.IO.Path]::GetTempPath()) "devkit-git-state-$([Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $gitSandbox -Force | Out-Null
+New-Item -ItemType Directory -Path $gitStateDir -Force | Out-Null
+
+try {
+    # Initialize a clean git repo in sandbox
+    $dotGit = Join-Path $gitSandbox ".git"
+    $gitInfo = Join-Path $dotGit "info"
+    New-Item -ItemType Directory -Path $gitInfo -Force | Out-Null
+    $excludeFile = Join-Path $gitInfo "exclude"
+
+    # Pre-existing user entries in .git/info/exclude
+    $userHeader = "# User custom excludes`nmy-local-notes.txt`nscratch-debug/"
+    Set-Content -Path $excludeFile -Value $userHeader
+
+    # Dummy tracked/untracked test files in consumer
+    $dummyGitignore = Join-Path $gitSandbox ".gitignore"
+    Set-Content -Path $dummyGitignore -Value "node_modules/`ndist/"
+    $gitignoreShaBefore = Get-DevKitSha256 -Path $dummyGitignore
+
+    # 15.1 Safe failure when not a git repository
+    $noGitDir = Join-Path ([System.IO.Path]::GetTempPath()) "devkit-nogit-$([Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $noGitDir -Force | Out-Null
+    try {
+        $noGitRes = Set-DevKitGitExclude -ProjectDir $noGitDir -ExcludePaths @(".claude/")
+        Assert-Equal $noGitRes.Updated $false "Gracefully skips non-git directory without throwing"
+        Assert-Equal $noGitRes.Reason "NoGitRepository" "Identifies reason as NoGitRepository"
+    }
+    finally {
+        Remove-Item -Path $noGitDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # 15.2 Deriving profile exclude paths
+    $excludePaths = Get-DevKitProfileExcludePaths -ProfileName "rp-doces" -DevKitRoot $devKitRoot
+    Assert-True ($excludePaths -contains ".agents/") "Exclude list includes .agents/"
+    Assert-True ($excludePaths -contains ".claude/") "Exclude list includes .claude/"
+    Assert-True ($excludePaths -contains "CLAUDE.md") "Exclude list includes CLAUDE.md"
+    Assert-True ($excludePaths -contains "AGENTS.md") "Exclude list includes AGENTS.md"
+    Assert-True ($excludePaths -contains ".mcp.json") "Exclude list includes .mcp.json"
+    Assert-True ($excludePaths -contains ".graphifyignore") "Exclude list includes .graphifyignore"
+    Assert-True ($excludePaths -contains "graphify-out/") "Exclude list includes graphify-out/"
+
+    # 15.3 Applying exclude block
+    $resExclude = Set-DevKitGitExclude -ProjectDir $gitSandbox -ExcludePaths $excludePaths
+    Assert-True $resExclude.Updated "Set-DevKitGitExclude reported updated"
+    $excludeContent = Get-Content -Path $excludeFile -Raw
+
+    Assert-True ($excludeContent.Contains("# BEGIN AGENT-DEVKIT MANAGED EXCLUDES")) "Contains start marker"
+    Assert-True ($excludeContent.Contains("# END AGENT-DEVKIT MANAGED EXCLUDES")) "Contains end marker"
+    Assert-True ($excludeContent.Contains("my-local-notes.txt")) "Preserves user-defined entries"
+    Assert-True ($excludeContent.Contains("scratch-debug/")) "Preserves user-defined directories"
+    Assert-True ($excludeContent.Contains(".claude/")) "Contains .claude/ in managed block"
+    Assert-True ($excludeContent.Contains("CLAUDE.md")) "Contains CLAUDE.md in managed block"
+
+    # .gitignore must not be touched
+    $gitignoreShaAfter = Get-DevKitSha256 -Path $dummyGitignore
+    Assert-Equal $gitignoreShaBefore $gitignoreShaAfter ".gitignore was NOT modified"
+
+    # 15.4 Idempotency of exclude block
+    $secondExclude = Set-DevKitGitExclude -ProjectDir $gitSandbox -ExcludePaths $excludePaths
+    $excludeContentSecond = Get-Content -Path $excludeFile -Raw
+    Assert-Equal $excludeContent.Trim() $excludeContentSecond.Trim() "Repeated call is 100% idempotent and does not duplicate lines"
+
+    # 15.5 Integration with Invoke-DevKitSync
+    # Materialize rp-doces profile into gitSandbox
+    $syncGit = Invoke-DevKitSync -ProjectDir $gitSandbox -Profile "rp-doces" -StateDir $gitStateDir -DevKitRoot $devKitRoot
+    Assert-Equal $syncGit.Materialized 42 "Sync materialized 42 files into git consumer"
+
+    # Verify that exclude file has the block intact
+    $postSyncExclude = Get-Content -Path $excludeFile -Raw
+    Assert-True ($postSyncExclude.Contains("# BEGIN AGENT-DEVKIT MANAGED EXCLUDES")) "Managed block intact post-sync"
+    Assert-True ($postSyncExclude.Contains("my-local-notes.txt")) "User entries intact post-sync"
+
+    # Add a normal application file
+    $normalFile = Join-Path $gitSandbox "normal-app-code.txt"
+    Set-Content -Path $normalFile -Value "const hello = 'world';"
+
+    # If git CLI is available, test real git status ignoring
+    $gitCmd = Get-Command "git" -ErrorAction SilentlyContinue
+    if ($null -ne $gitCmd) {
+        # Initialize real git in sandbox
+        & git -C $gitSandbox init -q
+        $gitStatusShort = & git -C $gitSandbox status --short
+        # normal-app-code.txt should be untracked (??)
+        Assert-True ($gitStatusShort -match "normal-app-code\.txt") "Normal application code is visible as untracked in git status"
+        # Materialized files (CLAUDE.md, AGENTS.md, .claude, .agents) must NOT appear in git status
+        Assert-True (-not ($gitStatusShort -match "CLAUDE\.md")) "CLAUDE.md is excluded from git status"
+        Assert-True (-not ($gitStatusShort -match "AGENTS\.md")) "AGENTS.md is excluded from git status"
+        Assert-True (-not ($gitStatusShort -match "\.claude")) ".claude directory is excluded from git status"
+        Assert-True (-not ($gitStatusShort -match "\.agents")) ".agents directory is excluded from git status"
+        # User excluded file should not appear
+        $userExcludedFile = Join-Path $gitSandbox "my-local-notes.txt"
+        Set-Content -Path $userExcludedFile -Value "my secret thoughts"
+        $statusWithUser = & git -C $gitSandbox status --short
+        Assert-True (-not ($statusWithUser -match "my-local-notes\.txt")) "User-excluded file remains ignored by git status"
+    }
+
+    # 15.6 Clean block removal
+    $remRes = Set-DevKitGitExclude -ProjectDir $gitSandbox -Remove
+    Assert-True $remRes.Updated "Remove succeeded"
+    $removedContent = Get-Content -Path $excludeFile -Raw
+    Assert-True (-not ($removedContent.Contains("BEGIN AGENT-DEVKIT MANAGED EXCLUDES"))) "Managed block removed"
+    Assert-True ($removedContent.Contains("my-local-notes.txt")) "User entries remain intact after block removal"
+}
+finally {
+    Remove-Item -Path $gitSandbox -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path $gitStateDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 Write-Host "`n=== TEST SUMMARY ===" -ForegroundColor Cyan
 Write-Host "Passed: $passCount" -ForegroundColor Green
 Write-Host "Failed: $failCount" -ForegroundColor $(if ($failCount -gt 0) { "Red" } else { "DarkGray" })

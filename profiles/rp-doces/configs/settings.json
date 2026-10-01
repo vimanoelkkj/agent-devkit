@@ -99,17 +99,7 @@
           }
         ]
       },
-      {
-        "matcher": "Bash|Read|Glob",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node",
-            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/graphify-orient.mjs"],
-            "timeout": 10
-          }
-        ]
-      },
+
       {
         "matcher": "Bash",
         "hooks": [
