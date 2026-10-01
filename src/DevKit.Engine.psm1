@@ -67,6 +67,72 @@ function Resolve-DevKitComponent {
     }
 }
 
+function Test-DevKitSafeTargetPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectDir,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RelativeTarget
+    )
+
+    $resolvedProject = (Resolve-Path $ProjectDir).Path.TrimEnd('\', '/')
+    $combined = [System.IO.Path]::GetFullPath((Join-Path $resolvedProject $RelativeTarget.Replace('/', [System.IO.Path]::DirectorySeparatorChar)))
+    if (-not $combined.StartsWith($resolvedProject + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -and $combined -ne $resolvedProject) {
+        throw "Path traversal detected: target '$RelativeTarget' escapes project root '$ProjectDir'."
+    }
+    return $combined
+}
+
+function Resolve-DevKitFileComponent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Category,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Subdir,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ItemName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot
+    )
+
+    $normItem = $ItemName.Replace('/', [System.IO.Path]::DirectorySeparatorChar).Replace('\', [System.IO.Path]::DirectorySeparatorChar)
+    $profilePath = Join-Path $DevKitRoot "profiles\$ProfileName\$Subdir\$normItem"
+    $corePath = Join-Path $DevKitRoot "core\$Subdir\$normItem"
+
+    $sourceType = $null
+    $resolvedPath = $null
+
+    if (Test-Path -Path $profilePath -PathType Leaf) {
+        $sourceType = "profile:$ProfileName"
+        $resolvedPath = $profilePath
+    }
+    elseif (Test-Path -Path $corePath -PathType Leaf) {
+        $sourceType = "core"
+        $resolvedPath = $corePath
+    }
+    else {
+        return $null
+    }
+
+    $hash = Get-DevKitSha256 -Path $resolvedPath
+    return @{
+        category     = $Category
+        name         = $ItemName
+        source       = $sourceType
+        sourcePath   = $resolvedPath
+        sha256       = $hash
+    }
+}
+
 function Resolve-DevKitHook {
     [CmdletBinding()]
     param(
@@ -80,31 +146,94 @@ function Resolve-DevKitHook {
         [string]$DevKitRoot
     )
 
-    $profileHookPath = Join-Path $DevKitRoot "profiles\$ProfileName\hooks\$HookName"
-    $coreHookPath = Join-Path $DevKitRoot "core\hooks\$HookName"
-
-    $sourceType = $null
-    $resolvedPath = $null
-
-    if (Test-Path -Path $profileHookPath -PathType Leaf) {
-        $sourceType = "profile:$ProfileName"
-        $resolvedPath = $profileHookPath
-    }
-    elseif (Test-Path -Path $coreHookPath -PathType Leaf) {
-        $sourceType = "core"
-        $resolvedPath = $coreHookPath
-    }
-    else {
-        return $null
-    }
-
-    $hash = Get-DevKitSha256 -Path $resolvedPath
+    $res = Resolve-DevKitFileComponent -Category "hook" -Subdir "hooks" -ItemName $HookName -ProfileName $ProfileName -DevKitRoot $DevKitRoot
+    if ($null -eq $res) { return $null }
     return @{
         hookName     = $HookName
-        source       = $sourceType
-        sourcePath   = $resolvedPath
-        sha256       = $hash
+        source       = $res.source
+        sourcePath   = $res.sourcePath
+        sha256       = $res.sha256
     }
+}
+
+function Resolve-DevKitInstruction {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InstructionName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot
+    )
+
+    return (Resolve-DevKitFileComponent -Category "instruction" -Subdir "instructions" -ItemName $InstructionName -ProfileName $ProfileName -DevKitRoot $DevKitRoot)
+}
+
+function Resolve-DevKitRule {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RuleName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot
+    )
+
+    return (Resolve-DevKitFileComponent -Category "rule" -Subdir "rules" -ItemName $RuleName -ProfileName $ProfileName -DevKitRoot $DevKitRoot)
+}
+
+function Resolve-DevKitAgent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AgentName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot
+    )
+
+    return (Resolve-DevKitFileComponent -Category "agent" -Subdir "agents" -ItemName $AgentName -ProfileName $ProfileName -DevKitRoot $DevKitRoot)
+}
+
+function Resolve-DevKitConfig {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ConfigName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot
+    )
+
+    return (Resolve-DevKitFileComponent -Category "config" -Subdir "configs" -ItemName $ConfigName -ProfileName $ProfileName -DevKitRoot $DevKitRoot)
+}
+
+function Resolve-DevKitOverlay {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OverlayName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot
+    )
+
+    return (Resolve-DevKitFileComponent -Category "overlay" -Subdir "overlays" -ItemName $OverlayName -ProfileName $ProfileName -DevKitRoot $DevKitRoot)
 }
 
 function Get-DevKitThirdPartyRegistry {
@@ -211,16 +340,27 @@ function Get-DevKitProfileList {
                 }
             }
 
+            $instructionsCount = if ($obj.instructions) { $obj.instructions.Count } else { 0 }
+            $rulesCount = if ($obj.rules) { $obj.rules.Count } else { 0 }
+            $agentsCount = if ($obj.agents) { $obj.agents.Count } else { 0 }
+            $configsCount = if ($obj.configs) { $obj.configs.Count } else { 0 }
+            $overlaysCount = if ($obj.overlays) { $obj.overlays.Count } else { 0 }
+
             $results.Add([PSCustomObject]@{
-                Name             = $obj.name
-                Version          = $obj.version
-                Description      = $obj.description
-                SkillsCount      = $skillsCount
-                ThirdPartyCount  = $tpSkillsCount
-                TotalSkillsCount = $skillsCount + $tpSkillsCount
-                HooksCount       = $hooksCount
-                AvailableCount   = $undeclaredCount
-                Path             = $profileFile
+                Name              = $obj.name
+                Version           = $obj.version
+                Description       = $obj.description
+                SkillsCount       = $skillsCount
+                ThirdPartyCount   = $tpSkillsCount
+                TotalSkillsCount  = $skillsCount + $tpSkillsCount
+                HooksCount        = $hooksCount
+                InstructionsCount = $instructionsCount
+                RulesCount        = $rulesCount
+                AgentsCount       = $agentsCount
+                ConfigsCount      = $configsCount
+                OverlaysCount     = $overlaysCount
+                AvailableCount    = $undeclaredCount
+                Path              = $profileFile
             })
         }
     }
@@ -795,14 +935,82 @@ function Get-DevKitManifest {
     return $null
 }
 
+function New-DevKitManifestFromProfile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot
+    )
+
+    $profileObj = Get-DevKitProfile -ProfileName $ProfileName -DevKitRoot $DevKitRoot
+
+    return [PSCustomObject]@{
+        profile          = $ProfileName
+        skills           = if ($profileObj.skills) { @($profileObj.skills) } else { @() }
+        thirdPartySkills = if ($profileObj.thirdPartySkills) { @($profileObj.thirdPartySkills) } else { @() }
+        hooks            = if ($profileObj.hooks) { @($profileObj.hooks) } else { @() }
+        instructions     = if ($profileObj.instructions) { @($profileObj.instructions) } else { @() }
+        rules            = if ($profileObj.rules) { @($profileObj.rules) } else { @() }
+        agents           = if ($profileObj.agents) { @($profileObj.agents) } else { @() }
+        configs          = if ($profileObj.configs) { @($profileObj.configs) } else { @() }
+        overlays         = if ($profileObj.overlays) { @($profileObj.overlays) } else { @() }
+        targets          = $profileObj.targets
+    }
+}
+
+function Get-DevKitLockPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectDir,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ProfileName = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string]$StateDir = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string]$DevKitRoot = $null
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($StateDir)) {
+        return (Join-Path $StateDir "agent-devkit.lock")
+    }
+
+    $projectManifest = Join-Path $ProjectDir "agent-devkit.json"
+    if (Test-Path -Path $projectManifest -PathType Leaf) {
+        return (Join-Path $ProjectDir "agent-devkit.lock")
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ProfileName) -and -not [string]::IsNullOrWhiteSpace($DevKitRoot)) {
+        $stateBase = Join-Path $DevKitRoot "state\$ProfileName"
+        return (Join-Path $stateBase "agent-devkit.lock")
+    }
+
+    return (Join-Path $ProjectDir "agent-devkit.lock")
+}
+
 function Get-DevKitLock {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$ProjectDir
+        [string]$ProjectDir,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ProfileName = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string]$StateDir = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string]$DevKitRoot = $null
     )
 
-    $lockPath = Join-Path $ProjectDir "agent-devkit.lock"
+    $lockPath = Get-DevKitLockPath -ProjectDir $ProjectDir -ProfileName $ProfileName -StateDir $StateDir -DevKitRoot $DevKitRoot
     if (Test-Path -Path $lockPath -PathType Leaf) {
         $content = [System.IO.File]::ReadAllText($lockPath, [System.Text.Encoding]::UTF8)
         return $content | ConvertFrom-Json
@@ -817,12 +1025,118 @@ function Save-DevKitLock {
         [string]$ProjectDir,
 
         [Parameter(Mandatory = $true)]
-        [psobject]$LockObject
+        [psobject]$LockObject,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ProfileName = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string]$StateDir = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string]$DevKitRoot = $null
     )
 
-    $lockPath = Join-Path $ProjectDir "agent-devkit.lock"
+    $lockPath = Get-DevKitLockPath -ProjectDir $ProjectDir -ProfileName $ProfileName -StateDir $StateDir -DevKitRoot $DevKitRoot
+    $lockDir = Split-Path -Parent $lockPath
+    if (-not (Test-Path $lockDir)) {
+        New-Item -ItemType Directory -Path $lockDir -Force | Out-Null
+    }
+
     $json = $LockObject | ConvertTo-Json -Depth 100
     [System.IO.File]::WriteAllText($lockPath, $json, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Get-DevKitSingleFileState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Type,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Component,
+
+        [Parameter(Mandatory = $true)]
+        [string]$File,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TargetDisplay,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TargetPath,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Source = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string]$SourcePath = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string]$SourceHash = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string]$LockHash = $null
+    )
+
+    $targetExists = Test-Path -Path $TargetPath -PathType Leaf
+    $targetHash = if ($targetExists) { Get-DevKitSha256 -Path $TargetPath } else { $null }
+
+    $status = "unknown"
+    $description = ""
+
+    if (-not $targetExists) {
+        $status = "missing"
+        $description = "$Type does not exist in target"
+    }
+    elseif ($null -eq $LockHash) {
+        if ($targetHash -eq $SourceHash) {
+            $status = "synced"
+            $description = "$Type matches source exactly"
+        }
+        else {
+            $status = "modified"
+            $description = "Local target $Type differs from source (unlocked)"
+        }
+    }
+    else {
+        $targetMatchesLock = ($targetHash -eq $LockHash)
+        $sourceMatchesLock = ($SourceHash -eq $LockHash)
+
+        if ($targetMatchesLock -and $sourceMatchesLock) {
+            $status = "synced"
+            $description = "$Type matches lock and source exactly"
+        }
+        elseif ($targetMatchesLock -and (-not $sourceMatchesLock)) {
+            $status = "update_available"
+            $description = "Upstream $Type updated; target is cleanly at lock version"
+        }
+        elseif ((-not $targetMatchesLock) -and $sourceMatchesLock) {
+            $status = "modified"
+            $description = "Local target $Type modified; source unchanged"
+        }
+        else {
+            $status = "conflict"
+            $description = "Both local target and source differ from lock"
+        }
+    }
+
+    return [PSCustomObject]@{
+        Type         = $Type
+        Component    = $Component
+        Skill        = $Component
+        File         = $File
+        Target       = $TargetDisplay
+        TargetPath   = $TargetPath
+        Source       = $Source
+        SourcePath   = $SourcePath
+        Status       = $status
+        SourceHash   = $SourceHash
+        LockHash     = $LockHash
+        TargetHash   = $targetHash
+        Description  = $description
+        IsThirdParty = $false
+        TempBase     = $null
+    }
 }
 
 function Test-DevKitProjectState {
@@ -905,6 +1219,61 @@ function Test-DevKitProjectState {
     if ($Manifest.thirdParty) {
         foreach ($s in $Manifest.thirdParty) {
             if (-not $requestedSkills.Contains($s)) { $requestedSkills.Add($s) }
+        }
+    }
+
+    # Extract requested hooks
+    $requestedHooks = [System.Collections.Generic.List[string]]::new()
+    if ($Manifest.hooks) {
+        foreach ($h in $Manifest.hooks) {
+            if (-not $requestedHooks.Contains($h)) { $requestedHooks.Add($h) }
+        }
+    }
+    if ($Manifest.components) {
+        if ($Manifest.components.hooks) {
+            foreach ($h in $Manifest.components.hooks) {
+                if (-not $requestedHooks.Contains($h)) { $requestedHooks.Add($h) }
+            }
+        }
+    }
+
+    # Extract requested instructions
+    $requestedInstructions = [System.Collections.Generic.List[string]]::new()
+    if ($Manifest.instructions) {
+        foreach ($i in $Manifest.instructions) {
+            if (-not $requestedInstructions.Contains($i)) { $requestedInstructions.Add($i) }
+        }
+    }
+
+    # Extract requested rules
+    $requestedRules = [System.Collections.Generic.List[string]]::new()
+    if ($Manifest.rules) {
+        foreach ($r in $Manifest.rules) {
+            if (-not $requestedRules.Contains($r)) { $requestedRules.Add($r) }
+        }
+    }
+
+    # Extract requested agents
+    $requestedAgents = [System.Collections.Generic.List[string]]::new()
+    if ($Manifest.agents) {
+        foreach ($a in $Manifest.agents) {
+            if (-not $requestedAgents.Contains($a)) { $requestedAgents.Add($a) }
+        }
+    }
+
+    # Extract requested configs
+    $requestedConfigs = [System.Collections.Generic.List[object]]::new()
+    if ($Manifest.configs) {
+        foreach ($c in $Manifest.configs) {
+            $requestedConfigs.Add($c)
+        }
+    }
+
+    # Extract requested overlays
+    $requestedOverlays = [System.Collections.Generic.List[object]]::new()
+    if ($Manifest.overlays) {
+        foreach ($o in $Manifest.overlays) {
+            $requestedOverlays.Add($o)
         }
     }
 
@@ -1118,80 +1487,232 @@ function Test-DevKitProjectState {
             continue
         }
 
-        # Check in lock
-        $lockHook = $null
-        if ($null -ne $Lock -and $null -ne $Lock.hooks) {
-            $lockHook = $Lock.hooks.$hookName
-        }
-
-        $sourceHash = $resolved.sha256
-        $sourcePath = $resolved.sourcePath
-        $lockHash = if ($null -ne $lockHook) { $lockHook.sha256 } else { $null }
+        $lockHash = if ($null -ne $Lock -and $null -ne $Lock.hooks -and $null -ne $Lock.hooks.$hookName) { $Lock.hooks.$hookName.sha256 } else { $null }
 
         foreach ($targetBase in $hookTargets) {
-            $targetFile = Join-Path (Join-Path $ProjectDir $targetBase) $hookName
-            $targetExists = Test-Path -Path $targetFile -PathType Leaf
-            $targetHash = if ($targetExists) { Get-DevKitSha256 -Path $targetFile } else { $null }
+            $relTarget = Join-Path $targetBase $hookName
+            $targetFile = Test-DevKitSafeTargetPath -ProjectDir $ProjectDir -RelativeTarget $relTarget
+            $targetDisplay = $relTarget.Replace('\', '/')
 
-            $status = "unknown"
-            $description = ""
+            $results.Add((Get-DevKitSingleFileState -Type "hook" `
+                -Component $hookName `
+                -File $hookName `
+                -TargetDisplay $targetDisplay `
+                -TargetPath $targetFile `
+                -Source $resolved.source `
+                -SourcePath $resolved.sourcePath `
+                -SourceHash $resolved.sha256 `
+                -LockHash $lockHash))
+        }
+    }
 
-            if (-not $targetExists) {
-                $status = "missing"
-                $description = "Hook does not exist in target"
-            }
-            elseif ($null -eq $lockHash) {
-                if ($targetHash -eq $sourceHash) {
-                    $status = "synced"
-                    $description = "Hook matches source exactly"
-                }
-                else {
-                    $status = "modified"
-                    $description = "Local target hook differs from source (unlocked)"
-                }
-            }
-            else {
-                $targetMatchesLock = ($targetHash -eq $lockHash)
-                $sourceMatchesLock = ($sourceHash -eq $lockHash)
-
-                if ($targetMatchesLock -and $sourceMatchesLock) {
-                    $status = "synced"
-                    $description = "Hook matches lock and source exactly"
-                }
-                elseif ($targetMatchesLock -and (-not $sourceMatchesLock)) {
-                    $status = "update_available"
-                    $description = "Upstream hook updated; target is cleanly at lock version"
-                }
-                elseif ((-not $targetMatchesLock) -and $sourceMatchesLock) {
-                    $status = "modified"
-                    $description = "Local target hook modified; source unchanged"
-                }
-                else {
-                    $status = "conflict"
-                    $description = "Both local target and source differ from lock"
-                }
-            }
-
-            $targetDisplay = Join-Path $targetBase $hookName.Replace('\', '/')
-
+    # 3. Process Instructions
+    foreach ($instName in $requestedInstructions) {
+        $resolved = Resolve-DevKitInstruction -InstructionName $instName -ProfileName $profile -DevKitRoot $DevKitRoot
+        if ($null -eq $resolved) {
             $results.Add([PSCustomObject]@{
-                Type         = "hook"
-                Component    = $hookName
-                Skill        = $hookName
-                File         = $hookName
-                Target       = $targetDisplay
-                TargetPath   = $targetFile
-                Source       = $resolved.source
-                SourcePath   = $sourcePath
-                Status       = $status
-                SourceHash   = $sourceHash
-                LockHash     = $lockHash
-                TargetHash   = $targetHash
-                Description  = $description
+                Type         = "instruction"
+                Component    = $instName
+                Skill        = $instName
+                File         = $instName
+                Target       = "*"
+                TargetPath   = $null
+                Source       = $null
+                SourcePath   = $null
+                Status       = "unresolved"
+                SourceHash   = $null
+                LockHash     = $null
+                TargetHash   = $null
+                Description  = "Instruction not found in DevKit profile $profile or core"
                 IsThirdParty = $false
                 TempBase     = $null
             })
+            continue
         }
+
+        $targetFile = Test-DevKitSafeTargetPath -ProjectDir $ProjectDir -RelativeTarget $instName
+        $targetDisplay = $instName.Replace('\', '/')
+        $lockHash = if ($null -ne $Lock -and $null -ne $Lock.instructions -and $null -ne $Lock.instructions.$instName) { $Lock.instructions.$instName.sha256 } else { $null }
+
+        $results.Add((Get-DevKitSingleFileState -Type "instruction" `
+            -Component $instName `
+            -File $instName `
+            -TargetDisplay $targetDisplay `
+            -TargetPath $targetFile `
+            -Source $resolved.source `
+            -SourcePath $resolved.sourcePath `
+            -SourceHash $resolved.sha256 `
+            -LockHash $lockHash))
+    }
+
+    # 4. Process Rules
+    foreach ($ruleName in $requestedRules) {
+        $resolved = Resolve-DevKitRule -RuleName $ruleName -ProfileName $profile -DevKitRoot $DevKitRoot
+        if ($null -eq $resolved) {
+            $results.Add([PSCustomObject]@{
+                Type         = "rule"
+                Component    = $ruleName
+                Skill        = $ruleName
+                File         = $ruleName
+                Target       = "*"
+                TargetPath   = $null
+                Source       = $null
+                SourcePath   = $null
+                Status       = "unresolved"
+                SourceHash   = $null
+                LockHash     = $null
+                TargetHash   = $null
+                Description  = "Rule not found in DevKit profile $profile or core"
+                IsThirdParty = $false
+                TempBase     = $null
+            })
+            continue
+        }
+
+        $normRule = $ruleName.Replace('/', [System.IO.Path]::DirectorySeparatorChar).Replace('\', [System.IO.Path]::DirectorySeparatorChar)
+        $relTarget = Join-Path ".claude\rules" $normRule
+        $targetFile = Test-DevKitSafeTargetPath -ProjectDir $ProjectDir -RelativeTarget $relTarget
+        $targetDisplay = $relTarget.Replace('\', '/')
+        $lockHash = if ($null -ne $Lock -and $null -ne $Lock.rules -and $null -ne $Lock.rules.$ruleName) { $Lock.rules.$ruleName.sha256 } else { $null }
+
+        $results.Add((Get-DevKitSingleFileState -Type "rule" `
+            -Component $ruleName `
+            -File $ruleName `
+            -TargetDisplay $targetDisplay `
+            -TargetPath $targetFile `
+            -Source $resolved.source `
+            -SourcePath $resolved.sourcePath `
+            -SourceHash $resolved.sha256 `
+            -LockHash $lockHash))
+    }
+
+    # 5. Process Agents
+    foreach ($agentName in $requestedAgents) {
+        $resolved = Resolve-DevKitAgent -AgentName $agentName -ProfileName $profile -DevKitRoot $DevKitRoot
+        if ($null -eq $resolved) {
+            $results.Add([PSCustomObject]@{
+                Type         = "agent"
+                Component    = $agentName
+                Skill        = $agentName
+                File         = $agentName
+                Target       = "*"
+                TargetPath   = $null
+                Source       = $null
+                SourcePath   = $null
+                Status       = "unresolved"
+                SourceHash   = $null
+                LockHash     = $null
+                TargetHash   = $null
+                Description  = "Agent not found in DevKit profile $profile or core"
+                IsThirdParty = $false
+                TempBase     = $null
+            })
+            continue
+        }
+
+        $normAgent = $agentName.Replace('/', [System.IO.Path]::DirectorySeparatorChar).Replace('\', [System.IO.Path]::DirectorySeparatorChar)
+        $relTarget = Join-Path ".claude\agents" $normAgent
+        $targetFile = Test-DevKitSafeTargetPath -ProjectDir $ProjectDir -RelativeTarget $relTarget
+        $targetDisplay = $relTarget.Replace('\', '/')
+        $lockHash = if ($null -ne $Lock -and $null -ne $Lock.agents -and $null -ne $Lock.agents.$agentName) { $Lock.agents.$agentName.sha256 } else { $null }
+
+        $results.Add((Get-DevKitSingleFileState -Type "agent" `
+            -Component $agentName `
+            -File $agentName `
+            -TargetDisplay $targetDisplay `
+            -TargetPath $targetFile `
+            -Source $resolved.source `
+            -SourcePath $resolved.sourcePath `
+            -SourceHash $resolved.sha256 `
+            -LockHash $lockHash))
+    }
+
+    # 6. Process Configs
+    foreach ($cfg in $requestedConfigs) {
+        $cfgName = if ($cfg -is [string]) { $cfg } else { $cfg.source }
+        $cfgTarget = if ($cfg -is [string]) {
+            if ($cfg -eq "settings.json") { ".claude\settings.json" } else { Join-Path ".claude" $cfg }
+        } else {
+            $cfg.target
+        }
+
+        $resolved = Resolve-DevKitConfig -ConfigName $cfgName -ProfileName $profile -DevKitRoot $DevKitRoot
+        if ($null -eq $resolved) {
+            $results.Add([PSCustomObject]@{
+                Type         = "config"
+                Component    = $cfgName
+                Skill        = $cfgName
+                File         = $cfgName
+                Target       = "*"
+                TargetPath   = $null
+                Source       = $null
+                SourcePath   = $null
+                Status       = "unresolved"
+                SourceHash   = $null
+                LockHash     = $null
+                TargetHash   = $null
+                Description  = "Config not found in DevKit profile $profile or core"
+                IsThirdParty = $false
+                TempBase     = $null
+            })
+            continue
+        }
+
+        $targetFile = Test-DevKitSafeTargetPath -ProjectDir $ProjectDir -RelativeTarget $cfgTarget
+        $targetDisplay = $cfgTarget.Replace('\', '/')
+        $lockHash = if ($null -ne $Lock -and $null -ne $Lock.configs -and $null -ne $Lock.configs.$cfgName) { $Lock.configs.$cfgName.sha256 } else { $null }
+
+        $results.Add((Get-DevKitSingleFileState -Type "config" `
+            -Component $cfgName `
+            -File $cfgName `
+            -TargetDisplay $targetDisplay `
+            -TargetPath $targetFile `
+            -Source $resolved.source `
+            -SourcePath $resolved.sourcePath `
+            -SourceHash $resolved.sha256 `
+            -LockHash $lockHash))
+    }
+
+    # 7. Process Overlays
+    foreach ($ov in $requestedOverlays) {
+        $ovName = if ($ov -is [string]) { $ov } else { $ov.source }
+        $ovTarget = if ($ov -is [string]) { $ov } else { $ov.target }
+
+        $resolved = Resolve-DevKitOverlay -OverlayName $ovName -ProfileName $profile -DevKitRoot $DevKitRoot
+        if ($null -eq $resolved) {
+            $results.Add([PSCustomObject]@{
+                Type         = "overlay"
+                Component    = $ovName
+                Skill        = $ovName
+                File         = $ovName
+                Target       = "*"
+                TargetPath   = $null
+                Source       = $null
+                SourcePath   = $null
+                Status       = "unresolved"
+                SourceHash   = $null
+                LockHash     = $null
+                TargetHash   = $null
+                Description  = "Overlay not found in DevKit profile $profile or core"
+                IsThirdParty = $false
+                TempBase     = $null
+            })
+            continue
+        }
+
+        $targetFile = Test-DevKitSafeTargetPath -ProjectDir $ProjectDir -RelativeTarget $ovTarget
+        $targetDisplay = $ovTarget.Replace('\', '/')
+        $lockHash = if ($null -ne $Lock -and $null -ne $Lock.overlays -and $null -ne $Lock.overlays.$ovName) { $Lock.overlays.$ovName.sha256 } else { $null }
+
+        $results.Add((Get-DevKitSingleFileState -Type "overlay" `
+            -Component $ovName `
+            -File $ovName `
+            -TargetDisplay $targetDisplay `
+            -TargetPath $targetFile `
+            -Source $resolved.source `
+            -SourcePath $resolved.sourcePath `
+            -SourceHash $resolved.sha256 `
+            -LockHash $lockHash))
     }
 
     return $results
@@ -1204,6 +1725,12 @@ function Invoke-DevKitSync {
         [string]$ProjectDir,
 
         [Parameter(Mandatory = $false)]
+        [string]$Profile = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string]$StateDir = $null,
+
+        [Parameter(Mandatory = $false)]
         [switch]$DryRun,
 
         [Parameter(Mandatory = $false)]
@@ -1214,14 +1741,19 @@ function Invoke-DevKitSync {
     )
 
     if ($null -eq $Manifest) {
-        $Manifest = Get-DevKitManifest -ProjectDir $ProjectDir
+        if (-not [string]::IsNullOrWhiteSpace($Profile)) {
+            $Manifest = New-DevKitManifestFromProfile -ProfileName $Profile -DevKitRoot $DevKitRoot
+        } else {
+            $Manifest = Get-DevKitManifest -ProjectDir $ProjectDir
+        }
     }
     if ($null -eq $Manifest) {
-        throw "Manifest agent-devkit.json not found in $ProjectDir"
+        throw "Manifest agent-devkit.json not found in $ProjectDir and no -Profile specified."
     }
 
-    $lock = Get-DevKitLock -ProjectDir $ProjectDir
-    $state = Test-DevKitProjectState -ProjectDir $ProjectDir -Manifest $manifest -Lock $lock -DevKitRoot $DevKitRoot
+    $activeProfile = if (-not [string]::IsNullOrWhiteSpace($Profile)) { $Profile } else { $Manifest.profile }
+    $lock = Get-DevKitLock -ProjectDir $ProjectDir -ProfileName $activeProfile -StateDir $StateDir -DevKitRoot $DevKitRoot
+    $state = Test-DevKitProjectState -ProjectDir $ProjectDir -Manifest $Manifest -Lock $lock -DevKitRoot $DevKitRoot
 
     $syncedCount = 0
     $materializedCount = 0
@@ -1230,39 +1762,85 @@ function Invoke-DevKitSync {
 
     $newLockSkills = @{}
     $newLockHooks = @{}
+    $newLockInstructions = @{}
+    $newLockRules = @{}
+    $newLockAgents = @{}
+    $newLockConfigs = @{}
+    $newLockOverlays = @{}
 
     try {
         foreach ($item in $state) {
-            if ($item.Type -eq "hook") {
-                $hookName = $item.Component
-                if (-not $newLockHooks.ContainsKey($hookName)) {
-                    $newLockHooks[$hookName] = @{
-                        source = $item.Source
-                        sha256 = $item.SourceHash
+            switch ($item.Type) {
+                "hook" {
+                    if (-not $newLockHooks.ContainsKey($item.Component)) {
+                        $newLockHooks[$item.Component] = @{
+                            source = $item.Source
+                            sha256 = $item.SourceHash
+                        }
                     }
                 }
-            }
-            else {
-                $skillName = $item.Skill
-                if (-not $newLockSkills.ContainsKey($skillName)) {
-                    $skillEntry = @{
-                        source  = $item.Source
-                        version = "1.0.0"
-                        files   = @{}
+                "instruction" {
+                    if (-not $newLockInstructions.ContainsKey($item.Component)) {
+                        $newLockInstructions[$item.Component] = @{
+                            source = $item.Source
+                            sha256 = $item.SourceHash
+                        }
                     }
-                    if ($item.IsThirdParty) {
-                        $skillEntry["repo"] = $item.Repo
-                        $skillEntry["ref"] = $item.Ref
-                        $skillEntry["subpath"] = $item.Subpath
-                        $skillEntry["policy"] = $item.Policy
-                        $skillEntry["license"] = $item.License
-                    }
-                    $newLockSkills[$skillName] = $skillEntry
                 }
+                "rule" {
+                    if (-not $newLockRules.ContainsKey($item.Component)) {
+                        $newLockRules[$item.Component] = @{
+                            source = $item.Source
+                            sha256 = $item.SourceHash
+                        }
+                    }
+                }
+                "agent" {
+                    if (-not $newLockAgents.ContainsKey($item.Component)) {
+                        $newLockAgents[$item.Component] = @{
+                            source = $item.Source
+                            sha256 = $item.SourceHash
+                        }
+                    }
+                }
+                "config" {
+                    if (-not $newLockConfigs.ContainsKey($item.Component)) {
+                        $newLockConfigs[$item.Component] = @{
+                            source = $item.Source
+                            sha256 = $item.SourceHash
+                        }
+                    }
+                }
+                "overlay" {
+                    if (-not $newLockOverlays.ContainsKey($item.Component)) {
+                        $newLockOverlays[$item.Component] = @{
+                            source = $item.Source
+                            sha256 = $item.SourceHash
+                        }
+                    }
+                }
+                "skill" {
+                    $skillName = $item.Skill
+                    if (-not $newLockSkills.ContainsKey($skillName)) {
+                        $skillEntry = @{
+                            source  = $item.Source
+                            version = "1.0.0"
+                            files   = @{}
+                        }
+                        if ($item.IsThirdParty) {
+                            $skillEntry["repo"] = $item.Repo
+                            $skillEntry["ref"] = $item.Ref
+                            $skillEntry["subpath"] = $item.Subpath
+                            $skillEntry["policy"] = $item.Policy
+                            $skillEntry["license"] = $item.License
+                        }
+                        $newLockSkills[$skillName] = $skillEntry
+                    }
 
-                if ($null -ne $item.File -and $item.File -ne "*") {
-                    $newLockSkills[$skillName].files[$item.File] = @{
-                        sha256 = $item.SourceHash
+                    if ($null -ne $item.File -and $item.File -ne "*") {
+                        $newLockSkills[$skillName].files[$item.File] = @{
+                            sha256 = $item.SourceHash
+                        }
                     }
                 }
             }
@@ -1307,11 +1885,16 @@ function Invoke-DevKitSync {
             $newLock = [PSCustomObject]@{
                 lockfileVersion = "1.0.0"
                 generatedAt     = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
-                profile         = "$($manifest.profile)@1.0.0"
+                profile         = "$activeProfile@1.0.0"
                 skills          = $newLockSkills
                 hooks           = $newLockHooks
+                instructions    = $newLockInstructions
+                rules           = $newLockRules
+                agents          = $newLockAgents
+                configs         = $newLockConfigs
+                overlays        = $newLockOverlays
             }
-            Save-DevKitLock -ProjectDir $ProjectDir -LockObject $newLock
+            Save-DevKitLock -ProjectDir $ProjectDir -LockObject $newLock -ProfileName $activeProfile -StateDir $StateDir -DevKitRoot $DevKitRoot
         }
     }
     finally {
@@ -1345,6 +1928,12 @@ function Invoke-DevKitVerify {
         [string]$ProjectDir,
 
         [Parameter(Mandatory = $false)]
+        [string]$Profile = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string]$StateDir = $null,
+
+        [Parameter(Mandatory = $false)]
         [psobject]$Manifest = $null,
 
         [Parameter(Mandatory = $true)]
@@ -1352,14 +1941,19 @@ function Invoke-DevKitVerify {
     )
 
     if ($null -eq $Manifest) {
-        $Manifest = Get-DevKitManifest -ProjectDir $ProjectDir
+        if (-not [string]::IsNullOrWhiteSpace($Profile)) {
+            $Manifest = New-DevKitManifestFromProfile -ProfileName $Profile -DevKitRoot $DevKitRoot
+        } else {
+            $Manifest = Get-DevKitManifest -ProjectDir $ProjectDir
+        }
     }
     if ($null -eq $Manifest) {
-        throw "Manifest agent-devkit.json not found in $ProjectDir"
+        throw "Manifest agent-devkit.json not found in $ProjectDir and no -Profile specified."
     }
 
-    $lock = Get-DevKitLock -ProjectDir $ProjectDir
-    $state = Test-DevKitProjectState -ProjectDir $ProjectDir -Manifest $manifest -Lock $lock -DevKitRoot $DevKitRoot
+    $activeProfile = if (-not [string]::IsNullOrWhiteSpace($Profile)) { $Profile } else { $Manifest.profile }
+    $lock = Get-DevKitLock -ProjectDir $ProjectDir -ProfileName $activeProfile -StateDir $StateDir -DevKitRoot $DevKitRoot
+    $state = Test-DevKitProjectState -ProjectDir $ProjectDir -Manifest $Manifest -Lock $lock -DevKitRoot $DevKitRoot
 
     $discrepancies = $state | Where-Object { $_.Status -ne "synced" }
 
@@ -1373,15 +1967,25 @@ function Invoke-DevKitVerify {
 
 Export-ModuleMember -Function `
     Get-DevKitSha256, `
+    Test-DevKitSafeTargetPath, `
     Resolve-DevKitComponent, `
+    Resolve-DevKitFileComponent, `
     Resolve-DevKitHook, `
+    Resolve-DevKitInstruction, `
+    Resolve-DevKitRule, `
+    Resolve-DevKitAgent, `
+    Resolve-DevKitConfig, `
+    Resolve-DevKitOverlay, `
     Get-DevKitThirdPartyRegistry, `
     Resolve-DevKitThirdParty, `
     Test-DevKitPackageSecurity, `
     Fetch-DevKitThirdParty, `
     Get-DevKitManifest, `
+    New-DevKitManifestFromProfile, `
+    Get-DevKitLockPath, `
     Get-DevKitLock, `
     Save-DevKitLock, `
+    Get-DevKitSingleFileState, `
     Test-DevKitProjectState, `
     Invoke-DevKitSync, `
     Invoke-DevKitVerify, `

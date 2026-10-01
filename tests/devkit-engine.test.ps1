@@ -415,8 +415,12 @@ $profList = Get-DevKitProfileList -DevKitRoot $devKitRoot
 Assert-True (@($profList).Count -ge 1) "Get-DevKitProfileList returns profiles"
 $rpDocesProf = $profList | Where-Object { $_.Name -eq "rp-doces" }
 Assert-True ($null -ne $rpDocesProf) "Profile list contains rp-doces"
-Assert-Equal $rpDocesProf.SkillsCount 3 "rp-doces has 3 declared skills"
-Assert-Equal $rpDocesProf.HooksCount 1 "rp-doces has 1 declared hook"
+Assert-Equal $rpDocesProf.SkillsCount 7 "rp-doces has 7 declared skills"
+Assert-Equal $rpDocesProf.HooksCount 9 "rp-doces has 9 declared hooks"
+Assert-Equal $rpDocesProf.InstructionsCount 2 "rp-doces has 2 declared instructions"
+Assert-Equal $rpDocesProf.RulesCount 15 "rp-doces has 15 declared rules"
+Assert-Equal $rpDocesProf.AgentsCount 1 "rp-doces has 1 declared agent"
+Assert-Equal $rpDocesProf.ConfigsCount 1 "rp-doces has 1 declared config"
 
 $profObj = Get-DevKitProfile -ProfileName "rp-doces" -DevKitRoot $devKitRoot
 Assert-Equal $profObj.name "rp-doces" "Get-DevKitProfile parses rp-doces profile.json"
@@ -525,6 +529,152 @@ try {
 }
 finally {
     Remove-Item -Path $tempProfileDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# Test 14: Expanded Profile Components (Instructions, Rules, Agents, Configs, Overlays) & External Sync
+Write-Host "`nTest 14: Expanded Profile Components (Instructions, Rules, Agents, Configs, Overlays) & External Sync" -ForegroundColor Yellow
+
+$sandboxPhaseA2 = Join-Path ([System.IO.Path]::GetTempPath()) "devkit-sandbox-phase-a2-$([Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $sandboxPhaseA2 -Force | Out-Null
+
+$externalStateDir = Join-Path ([System.IO.Path]::GetTempPath()) "devkit-ext-state-$([Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $externalStateDir -Force | Out-Null
+
+try {
+    # 14.1 Dry-Run with external profile and no manifest in consumer
+    $dryRes = Invoke-DevKitSync -ProjectDir $sandboxPhaseA2 -Profile "rp-doces" -StateDir $externalStateDir -DryRun -DevKitRoot $devKitRoot
+    Assert-True $dryRes.DryRun "Sync reported DryRun mode"
+    Assert-Equal (Get-ChildItem -Path $sandboxPhaseA2 -Recurse -File).Count 0 "DryRun did not write any files to sandbox"
+    Assert-True (-not (Test-Path (Join-Path $sandboxPhaseA2 "agent-devkit.json"))) "DryRun did not create manifest in consumer"
+    Assert-True (-not (Test-Path (Join-Path $sandboxPhaseA2 "agent-devkit.lock"))) "DryRun did not create lockfile in consumer"
+    Assert-True (-not (Test-Path (Join-Path $externalStateDir "agent-devkit.lock"))) "DryRun did not create lockfile in state dir"
+
+    # 14.2 Real External Sync (no manifest in consumer project)
+    $syncRes = Invoke-DevKitSync -ProjectDir $sandboxPhaseA2 -Profile "rp-doces" -StateDir $externalStateDir -DevKitRoot $devKitRoot
+    Assert-True ($syncRes.Materialized -gt 0) "External sync materialized components"
+    Assert-Equal $syncRes.Blocked 0 "Zero blocked components during clean external sync"
+
+    # Ensure consumer repo has ZERO DevKit infrastructure files
+    Assert-True (-not (Test-Path (Join-Path $sandboxPhaseA2 "agent-devkit.json"))) "Consumer project has NO agent-devkit.json"
+    Assert-True (-not (Test-Path (Join-Path $sandboxPhaseA2 "agent-devkit.lock"))) "Consumer project has NO agent-devkit.lock"
+    Assert-True (Test-Path (Join-Path $externalStateDir "agent-devkit.lock")) "Lockfile was saved strictly in external StateDir"
+
+    # 14.3 Materialization of Instructions
+    $claudeMd = Join-Path $sandboxPhaseA2 "CLAUDE.md"
+    $agentsMd = Join-Path $sandboxPhaseA2 "AGENTS.md"
+    Assert-True (Test-Path $claudeMd -PathType Leaf) "Materialized root CLAUDE.md"
+    Assert-True (Test-Path $agentsMd -PathType Leaf) "Materialized root AGENTS.md"
+    Assert-Equal (Get-DevKitSha256 -Path $claudeMd) (Get-DevKitSha256 -Path (Join-Path $devKitRoot "profiles\rp-doces\instructions\CLAUDE.md")) "CLAUDE.md matches source SHA-256"
+    Assert-Equal (Get-DevKitSha256 -Path $agentsMd) (Get-DevKitSha256 -Path (Join-Path $devKitRoot "profiles\rp-doces\instructions\AGENTS.md")) "AGENTS.md matches source SHA-256"
+
+    # 14.4 Materialization of Rules
+    $ruleDdd = Join-Path $sandboxPhaseA2 ".claude\rules\01-ddd.md"
+    $ruleReact = Join-Path $sandboxPhaseA2 ".claude\rules\react\coding-standards.md"
+    $ruleTs = Join-Path $sandboxPhaseA2 ".claude\rules\typescript\coding-standards.md"
+    Assert-True (Test-Path $ruleDdd -PathType Leaf) "Materialized rule 01-ddd.md"
+    Assert-True (Test-Path $ruleReact -PathType Leaf) "Materialized nested rule react/coding-standards.md"
+    Assert-True (Test-Path $ruleTs -PathType Leaf) "Materialized nested rule typescript/coding-standards.md"
+    $ruleFiles = Get-ChildItem -Path (Join-Path $sandboxPhaseA2 ".claude\rules") -Recurse -File
+    Assert-Equal $ruleFiles.Count 15 "Materialized all 15 rules"
+
+    # 14.5 Materialization of Agents
+    $agentFile = Join-Path $sandboxPhaseA2 ".claude\agents\money-path-reviewer.md"
+    Assert-True (Test-Path $agentFile -PathType Leaf) "Materialized agent money-path-reviewer.md"
+    Assert-Equal (Get-DevKitSha256 -Path $agentFile) (Get-DevKitSha256 -Path (Join-Path $devKitRoot "profiles\rp-doces\agents\money-path-reviewer.md")) "Agent file matches source SHA-256"
+
+    # 14.6 Materialization of Configs
+    $configFile = Join-Path $sandboxPhaseA2 ".claude\settings.json"
+    Assert-True (Test-Path $configFile -PathType Leaf) "Materialized config .claude/settings.json"
+    Assert-Equal (Get-DevKitSha256 -Path $configFile) (Get-DevKitSha256 -Path (Join-Path $devKitRoot "profiles\rp-doces\configs\settings.json")) "Config file matches source SHA-256"
+
+    # 14.7 Materialization of Hooks (including verify-on-stop.mjs)
+    $hookVerify = Join-Path $sandboxPhaseA2 ".claude\hooks\verify-on-stop.mjs"
+    Assert-True (Test-Path $hookVerify -PathType Leaf) "Materialized hook verify-on-stop.mjs"
+    $hookFiles = Get-ChildItem -Path (Join-Path $sandboxPhaseA2 ".claude\hooks") -File
+    Assert-Equal $hookFiles.Count 9 "Materialized all 9 hooks"
+
+    # 14.8 Verify on cleanly materialized external project
+    $verRes = Invoke-DevKitVerify -ProjectDir $sandboxPhaseA2 -Profile "rp-doces" -StateDir $externalStateDir -DevKitRoot $devKitRoot
+    Assert-True $verRes.Verified "External verify succeeds immediately after sync"
+    Assert-Equal $verRes.Discrepancies.Count 0 "Zero discrepancies reported on clean external sync"
+
+    # 14.9 Sync when targets already exist (idempotence)
+    $secondSync = Invoke-DevKitSync -ProjectDir $sandboxPhaseA2 -Profile "rp-doces" -StateDir $externalStateDir -DevKitRoot $devKitRoot
+    Assert-Equal $secondSync.Materialized 0 "Second sync materializes 0 files (idempotent)"
+    Assert-Equal $secondSync.Synced $syncRes.TotalFiles "All files reported as synced"
+
+    # 14.10 Local modification detection and overwrite refusal across categories
+    Set-Content -Path $claudeMd -Value "Modified local CLAUDE.md"
+    Set-Content -Path $ruleDdd -Value "Modified local 01-ddd.md"
+    Set-Content -Path $agentFile -Value "Modified local money-path-reviewer.md"
+    Set-Content -Path $configFile -Value "{ `"modified`": true }"
+    Set-Content -Path $hookVerify -Value "// Modified local hook"
+
+    $verMod = Invoke-DevKitVerify -ProjectDir $sandboxPhaseA2 -Profile "rp-doces" -StateDir $externalStateDir -DevKitRoot $devKitRoot
+    Assert-True (-not $verMod.Verified) "Verify detects local modifications across categories"
+    $modTypes = $verMod.Discrepancies | Select-Object -ExpandProperty Type
+    Assert-True ($modTypes -contains "instruction") "Verify detected modified instruction"
+    Assert-True ($modTypes -contains "rule") "Verify detected modified rule"
+    Assert-True ($modTypes -contains "agent") "Verify detected modified agent"
+    Assert-True ($modTypes -contains "config") "Verify detected modified config"
+    Assert-True ($modTypes -contains "hook") "Verify detected modified hook"
+
+    $syncMod = Invoke-DevKitSync -ProjectDir $sandboxPhaseA2 -Profile "rp-doces" -StateDir $externalStateDir -DevKitRoot $devKitRoot
+    Assert-Equal $syncMod.Blocked 5 "Sync blocked all 5 modified files from being overwritten"
+    Assert-Equal (Get-Content -Path $claudeMd -Raw).Trim() "Modified local CLAUDE.md" "Local instruction modification was preserved"
+    Assert-Equal (Get-Content -Path $ruleDdd -Raw).Trim() "Modified local 01-ddd.md" "Local rule modification was preserved"
+    Assert-Equal (Get-Content -Path $agentFile -Raw).Trim() "Modified local money-path-reviewer.md" "Local agent modification was preserved"
+    Assert-Equal (Get-Content -Path $configFile -Raw).Trim() "{ `"modified`": true }" "Local config modification was preserved"
+    Assert-Equal (Get-Content -Path $hookVerify -Raw).Trim() "// Modified local hook" "Local hook modification was preserved"
+
+    # 14.11 Path Traversal security validation
+    Assert-Throws {
+        Test-DevKitSafeTargetPath -ProjectDir $sandboxPhaseA2 -RelativeTarget "../outside.txt"
+    } "Path traversal detected" "Rejects relative path traversal escaping project dir"
+
+    Assert-Throws {
+        Test-DevKitSafeTargetPath -ProjectDir $sandboxPhaseA2 -RelativeTarget "sub/../../escape.txt"
+    } "Path traversal detected" "Rejects nested path traversal escaping project dir"
+
+    # 14.12 Custom overlays & profile isolation test
+    $isoProfileDir = Join-Path $devKitRoot "profiles\test-isolation-profile"
+    New-Item -ItemType Directory -Path (Join-Path $isoProfileDir "overlays") -Force | Out-Null
+    Set-Content -Path (Join-Path $isoProfileDir "overlays\custom-file.txt") -Value "Custom overlay content"
+    $isoProfileJson = [ordered]@{
+        name     = "test-isolation-profile"
+        version  = "1.0.0"
+        skills   = @()
+        hooks    = @()
+        overlays = @(
+            @{ source = "custom-file.txt"; target = "config/custom-output.txt" }
+        )
+    } | ConvertTo-Json -Depth 10
+    Set-Content -Path (Join-Path $isoProfileDir "profile.json") -Value $isoProfileJson
+
+    $isoSandbox = Join-Path ([System.IO.Path]::GetTempPath()) "devkit-iso-sandbox-$([Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $isoSandbox -Force | Out-Null
+    $isoStateDir = Join-Path ([System.IO.Path]::GetTempPath()) "devkit-iso-state-$([Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $isoStateDir -Force | Out-Null
+
+    try {
+        $isoSync = Invoke-DevKitSync -ProjectDir $isoSandbox -Profile "test-isolation-profile" -StateDir $isoStateDir -DevKitRoot $devKitRoot
+        Assert-Equal $isoSync.Materialized 1 "Overlay materialized exactly 1 file"
+        $overlayTarget = Join-Path $isoSandbox "config\custom-output.txt"
+        Assert-True (Test-Path $overlayTarget -PathType Leaf) "Custom overlay file exists at declared target"
+        Assert-Equal (Get-Content $overlayTarget -Raw).Trim() "Custom overlay content" "Overlay content matches source"
+
+        $rpDocesManifest = New-DevKitManifestFromProfile -ProfileName "rp-doces" -DevKitRoot $devKitRoot
+        Assert-Equal $rpDocesManifest.overlays.Count 0 "rp-doces profile remains isolated from other profile overlays"
+    }
+    finally {
+        Remove-Item -Path $isoProfileDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $isoSandbox -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $isoStateDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+finally {
+    Remove-Item -Path $sandboxPhaseA2 -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path $externalStateDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "`n=== TEST SUMMARY ===" -ForegroundColor Cyan

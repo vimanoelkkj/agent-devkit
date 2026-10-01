@@ -5,10 +5,50 @@
   "skills": [
     "rp-targeted-workflow",
     "money-test",
-    "new-migration"
+    "new-migration",
+    "efficient-coding-workflow",
+    "minimal-diff",
+    "targeted-repo-search",
+    "targeted-validation"
   ],
+  "thirdPartySkills": [],
   "hooks": [
-    "guard-d1-remote.mjs"
+    "guard-applied-migrations.mjs",
+    "guard-d1-remote.mjs",
+    "guard-git-destructive.mjs",
+    "hook-io.mjs",
+    "large-file-warning.mjs",
+    "secret-scan.mjs",
+    "session-scratch.mjs",
+    "set-files-changed.mjs",
+    "verify-on-stop.mjs"
   ],
-  "thirdPartySkills": []
+  "instructions": [
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "rules": [
+    "01-ddd.md",
+    "02-design-patterns.md",
+    "03-coding-principles.md",
+    "04-code-quality.md",
+    "05-testing.md",
+    "06-security.md",
+    "07-subagent-dispatch.md",
+    "08-parallel-subagent-driven-development.md",
+    "hooks-cross-platform.md",
+    "hooks-cwd-resolution.md",
+    "testing.md",
+    "typescript.md",
+    "verification.md",
+    "react/coding-standards.md",
+    "typescript/coding-standards.md"
+  ],
+  "agents": [
+    "money-path-reviewer.md"
+  ],
+  "configs": [
+    "settings.json"
+  ],
+  "overlays": []
 }

@@ -21,6 +21,12 @@ param(
     [string]$ManifestFile = $null,
 
     [Parameter(Mandatory = $false)]
+    [string]$Profile = $null,
+
+    [Parameter(Mandatory = $false)]
+    [string]$StateDir = $null,
+
+    [Parameter(Mandatory = $false)]
     [switch]$DryRun
 )
 
@@ -48,6 +54,12 @@ Write-Host "agent-devkit v1.0.0" -ForegroundColor Cyan
 Write-Host "DevKit Root: $devKitRoot" -ForegroundColor DarkGray
 if ($Command -in @("sync", "verify")) {
     Write-Host "Project Dir: $ProjectDir" -ForegroundColor DarkGray
+    if ($Profile) {
+        Write-Host "Profile:     $Profile" -ForegroundColor DarkGray
+    }
+    if ($StateDir) {
+        Write-Host "State Dir:   $StateDir" -ForegroundColor DarkGray
+    }
     if ($explicitManifest) {
         Write-Host "Manifest:    $ManifestFile" -ForegroundColor DarkGray
     }
@@ -120,13 +132,17 @@ switch ($Command) {
                 Write-Host "=== DEV-KIT PROFILES ===" -ForegroundColor Yellow
                 $tableData = $profiles | ForEach-Object {
                     [PSCustomObject]@{
-                        Profile     = $_.Name
-                        Version     = $_.Version
-                        Skills      = $_.SkillsCount
-                        ThirdParty  = $_.ThirdPartyCount
-                        Hooks       = $_.HooksCount
-                        Available   = $_.AvailableCount
-                        Description = $_.Description
+                        Profile      = $_.Name
+                        Version      = $_.Version
+                        Skills       = $_.SkillsCount
+                        ThirdParty   = $_.ThirdPartyCount
+                        Hooks        = $_.HooksCount
+                        Instructions = $_.InstructionsCount
+                        Rules        = $_.RulesCount
+                        Agents       = $_.AgentsCount
+                        Configs      = $_.ConfigsCount
+                        Available    = $_.AvailableCount
+                        Description  = $_.Description
                     }
                 }
                 $tableData | Format-Table -AutoSize
@@ -169,6 +185,43 @@ switch ($Command) {
                 if ($pObj.hooks) {
                     foreach ($h in $pObj.hooks) {
                         Write-Host "  - $h"
+                    }
+                }
+
+                if ($pObj.instructions) {
+                    Write-Host "`nDeclared Instructions:" -ForegroundColor Cyan
+                    foreach ($i in $pObj.instructions) {
+                        Write-Host "  - $i"
+                    }
+                }
+
+                if ($pObj.rules) {
+                    Write-Host "`nDeclared Rules:" -ForegroundColor Cyan
+                    foreach ($r in $pObj.rules) {
+                        Write-Host "  - $r"
+                    }
+                }
+
+                if ($pObj.agents) {
+                    Write-Host "`nDeclared Agents:" -ForegroundColor Cyan
+                    foreach ($a in $pObj.agents) {
+                        Write-Host "  - $a"
+                    }
+                }
+
+                if ($pObj.configs) {
+                    Write-Host "`nDeclared Configs:" -ForegroundColor Cyan
+                    foreach ($c in $pObj.configs) {
+                        $display = if ($c -is [string]) { $c } else { "$($c.source) -> $($c.target)" }
+                        Write-Host "  - $display"
+                    }
+                }
+
+                if ($pObj.overlays) {
+                    Write-Host "`nDeclared Overlays:" -ForegroundColor Cyan
+                    foreach ($o in $pObj.overlays) {
+                        $display = if ($o -is [string]) { $o } else { "$($o.source) -> $($o.target)" }
+                        Write-Host "  - $display"
                     }
                 }
             }
@@ -243,7 +296,7 @@ switch ($Command) {
     }
 
     "verify" {
-        $result = Invoke-DevKitVerify -ProjectDir $ProjectDir -Manifest $explicitManifest -DevKitRoot $devKitRoot
+        $result = Invoke-DevKitVerify -ProjectDir $ProjectDir -Profile $Profile -StateDir $StateDir -Manifest $explicitManifest -DevKitRoot $devKitRoot
         Write-Host "Total Managed Targets: $($result.TotalFiles)"
 
         if ($result.Verified) {
@@ -258,7 +311,7 @@ switch ($Command) {
     }
 
     "sync" {
-        $result = Invoke-DevKitSync -ProjectDir $ProjectDir -Manifest $explicitManifest -DryRun:$DryRun -DevKitRoot $devKitRoot
+        $result = Invoke-DevKitSync -ProjectDir $ProjectDir -Profile $Profile -StateDir $StateDir -Manifest $explicitManifest -DryRun:$DryRun -DevKitRoot $devKitRoot
 
         Write-Host "Execution Summary:"
         Write-Host "  Total Files Evaluated: $($result.TotalFiles)"
