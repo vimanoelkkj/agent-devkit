@@ -11,7 +11,7 @@ disable-model-invocation: true
    - `-- Migration NNNN: <título>` and why the change exists (tracking tag if any: `A1`, `Passo N`, `HUMAN-N`);
    - what the migration does NOT touch (list the ledger/stock tables it leaves alone);
    - how it stays safe on the production D1.
-3. **Additive only.** Prefer `CREATE TABLE`, `ALTER TABLE ... ADD COLUMN`, `CREATE INDEX`, `CREATE TRIGGER`. Before any `DROP TABLE` + `RENAME` rebuild, run `grep -n "REFERENCES <tabela>" migrations/*.sql`: if any child uses `ON DELETE CASCADE`, STOP and tell the user — the rebuild would wipe child rows even under `PRAGMA defer_foreign_keys` (see `migrations/CLAUDE.md` and `scripts/b5-production-compat.sql`).
+3. **Additive only.** Prefer `CREATE TABLE`, `ALTER TABLE ... ADD COLUMN`, `CREATE INDEX`, `CREATE TRIGGER`. Before any `DROP TABLE` + `RENAME` rebuild, run `grep -n "REFERENCES <tabela>" migrations/*.sql`: if any child uses `ON DELETE CASCADE`, STOP and tell the user — the rebuild would wipe child rows even under `PRAGMA defer_foreign_keys` (see `docs/architecture/database-migrations.md` and `scripts/b5-production-compat.sql`).
 4. **Invariants in the database.** Express status enums as `CHECK (status IN (...))`, uniqueness as UNIQUE indexes, and cross-row rules as `BEFORE` triggers; money as `*_centavos INTEGER`; fractional quantities as integer thousandths.
 5. **Validate locally.**
    - `npm run db:migrate:local`

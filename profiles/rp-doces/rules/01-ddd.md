@@ -5,7 +5,7 @@ paths:
 
 # Domain-Driven Design
 
-> **Project override (rp-doces):** money, stock and idempotency invariants are enforced by D1 CHECK/UNIQUE constraints, triggers and `db.batch()` in `functions/lib/` — never move them into in-memory domain models, and do not add repositories or interfaces around D1. Where this file disagrees, `functions/lib/CLAUDE.md` wins.
+> **Project override (rp-doces):** money, stock and idempotency invariants are enforced by D1 CHECK/UNIQUE constraints, triggers and `db.batch()` in `functions/lib/` — never move them into in-memory domain models, and do not add repositories or interfaces around D1. Where this file disagrees, `docs/architecture/overview.md` and `docs/architecture/financial-ledger.md` win.
 
 ## Objective
 

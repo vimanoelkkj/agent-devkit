@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # /money-test <area> <comportamento>
 
-1. **Read the harness first**: `tests/CLAUDE.md`, `tests/helpers/b3.mjs` (exports `app`, `fixture`, `state`, `barrier`, `withWaitUntil`, `approvedMp`, `refund`), and one close example (`tests/a1.test.mjs` for idempotency/races, `tests/payment-sync-integrity.test.mjs` for Mercado Pago sync).
+1. **Read the harness first**: `docs/architecture/testing-strategy.md`, `tests/helpers/b3.mjs` (exports `app`, `fixture`, `state`, `barrier`, `withWaitUntil`, `approvedMp`, `refund`), and one close example (`tests/a1.test.mjs` for idempotency/races, `tests/payment-sync-integrity.test.mjs` for Mercado Pago sync).
 2. **File**: `tests/<area>-<comportamento>.test.mjs` (kebab-case, Portuguese). It is picked up automatically by `scripts/run-tests.mjs` — no list to edit.
 3. **Skeleton**:
    ```js

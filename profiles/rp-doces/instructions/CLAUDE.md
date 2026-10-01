@@ -78,10 +78,9 @@ NOT self-commit. Untagged or uncertain tasks run serial (no regression). Full pr
 Canonical product architecture and contracts are maintained in neutral documentation:
 - `README.md` — platform overview and deployment model
 - `docs/architecture/overview.md` — edge runtime, trust boundaries, and shared domain modules
-- `docs/architecture/financial-ledger.md` — immutable ledger invariants, refunds, and A1 idempotency
-- `docs/architecture/pix-and-stock.md` — Pix lifecycle, CAS stock reservation, and anti-TOCTOU guards
-- `docs/architecture/payment-sync.md` — payment transition state machine and webhook reconciliation
-- `docs/architecture/database-migrations.md` — Cloudflare D1 policies and foreign key safety
+- `docs/architecture/financial-ledger.md` — ledger principles, integer centavos, refund rows, and A1 idempotency
+- `docs/architecture/pix-and-stock.md` — Pix lifecycle, stock reservations, SQLite CHECK guard, and Mercado Pago verification
+- `docs/architecture/database-migrations.md` — Cloudflare D1 policies, foreign key cascade hazards, and safe recreation protocol
 - `docs/architecture/testing-strategy.md` — Miniflare test harness and deterministic concurrency barriers
 - `docs/ROLLBACK.md` — production incident recovery
 

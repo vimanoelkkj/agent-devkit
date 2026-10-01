@@ -11,10 +11,10 @@ A disciplined, evidence-driven engineering workflow tailored for the R&P Doces c
 
 - **Stack**: React 18, TypeScript, Vite, Cloudflare Pages Functions, Cloudflare D1 (SQLite), Cloudflare R2, Mercado Pago (Pix).
 - **Core Invariants**:
-  - **Financial integrity & idempotency (A1)**: Immutable ledger (`pedido_pagamentos`), CAS transitions (`isTransitionAllowed`), stable idempotency keys.
-  - **Stock consistency**: Strict reservation conversion/release, no duplicate deductions.
+  - **Financial integrity & idempotency (A1)**: Ledger principles (additive refunds, settled amount conservation), state transitions, stable operation keys (see `docs/architecture/financial-ledger.md`).
+  - **Stock consistency**: Strict reservation conversion/release, SQLite `CHECK` guard, no duplicate deductions (see `docs/architecture/pix-and-stock.md`).
   - **Security & CSRF**: Mutation endpoints enforce `sameOrigin()`; admin routes enforce `requireUser()`.
-  - **Concurrency**: SQLite/D1 CAS on state updates and rate limit tables; never read-then-write without atomic guards.
+  - **Concurrency**: SQLite/D1 integrity constraints (`CHECK`, `UNIQUE`) and atomic batch updates; never read-then-write without atomic guards (see `docs/architecture/pix-and-stock.md`).
   - **Storefront UX & A11y**: Mobile-first, responsive, accessible SVG icons/aria labels, `prefers-reduced-motion` compliance.
 
 ---
