@@ -122,6 +122,411 @@ function Get-DevKitThirdPartyRegistry {
     return $null
 }
 
+function Get-DevKitSkillDescription {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SkillDir
+    )
+
+    $skillMd = Join-Path $SkillDir "SKILL.md"
+    if (Test-Path -Path $skillMd -PathType Leaf) {
+        $lines = [System.IO.File]::ReadAllLines($skillMd, [System.Text.Encoding]::UTF8)
+        $inFrontmatter = $false
+        foreach ($line in $lines) {
+            $trimmed = $line.Trim()
+            if ($trimmed -eq "---") {
+                if ($inFrontmatter) { break }
+                $inFrontmatter = $true
+                continue
+            }
+            if ($inFrontmatter -and $trimmed -match '^description:\s*(.+)$') {
+                return $matches[1].Trim('"', "'")
+            }
+        }
+        foreach ($line in $lines) {
+            $trimmed = $line.Trim()
+            if ($trimmed -and -not $trimmed.StartsWith("#") -and $trimmed -ne "---") {
+                return $trimmed
+            }
+        }
+    }
+    return ""
+}
+
+function Get-DevKitProfile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot
+    )
+
+    $profilePath = Join-Path $DevKitRoot "profiles\$ProfileName\profile.json"
+    if (-not (Test-Path -Path $profilePath -PathType Leaf)) {
+        throw "Profile '$ProfileName' not found at '$profilePath'."
+    }
+
+    $content = [System.IO.File]::ReadAllText($profilePath, [System.Text.Encoding]::UTF8)
+    return $content | ConvertFrom-Json
+}
+
+function Get-DevKitProfileList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot
+    )
+
+    $profilesDir = Join-Path $DevKitRoot "profiles"
+    $results = [System.Collections.Generic.List[psobject]]::new()
+    if (-not (Test-Path -Path $profilesDir -PathType Container)) {
+        return @()
+    }
+
+    $dirs = Get-ChildItem -Path $profilesDir -Directory -ErrorAction SilentlyContinue
+    foreach ($d in $dirs) {
+        $profileFile = Join-Path $d.FullName "profile.json"
+        if (Test-Path -Path $profileFile -PathType Leaf) {
+            $content = [System.IO.File]::ReadAllText($profileFile, [System.Text.Encoding]::UTF8)
+            $obj = $content | ConvertFrom-Json
+
+            $skillsCount = if ($obj.skills) { $obj.skills.Count } else { 0 }
+            $tpSkillsCount = if ($obj.thirdPartySkills) { $obj.thirdPartySkills.Count } else { 0 }
+            $hooksCount = if ($obj.hooks) { $obj.hooks.Count } else { 0 }
+
+            $declaredSkills = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            if ($obj.skills) { foreach ($s in $obj.skills) { $declaredSkills.Add($s) | Out-Null } }
+
+            $pSkillsDir = Join-Path $d.FullName "skills"
+            $undeclaredCount = 0
+            if (Test-Path -Path $pSkillsDir -PathType Container) {
+                $pSkillDirs = Get-ChildItem -Path $pSkillsDir -Directory -ErrorAction SilentlyContinue
+                foreach ($ps in $pSkillDirs) {
+                    if (-not $declaredSkills.Contains($ps.Name)) {
+                        $undeclaredCount++
+                    }
+                }
+            }
+
+            $results.Add([PSCustomObject]@{
+                Name             = $obj.name
+                Version          = $obj.version
+                Description      = $obj.description
+                SkillsCount      = $skillsCount
+                ThirdPartyCount  = $tpSkillsCount
+                TotalSkillsCount = $skillsCount + $tpSkillsCount
+                HooksCount       = $hooksCount
+                AvailableCount   = $undeclaredCount
+                Path             = $profileFile
+            })
+        }
+    }
+
+    return ,($results.ToArray())
+}
+
+function Get-DevKitSkillCatalog {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot
+    )
+
+    $skills = [System.Collections.Generic.List[psobject]]::new()
+
+    # Pre-load profiles to know which profiles declare which skills
+    $profileList = Get-DevKitProfileList -DevKitRoot $DevKitRoot
+    $profileMap = @{}
+    foreach ($p in $profileList) {
+        $profileObj = Get-DevKitProfile -ProfileName $p.Name -DevKitRoot $DevKitRoot
+        $profileMap[$p.Name] = $profileObj
+    }
+
+    # 1. Core skills (under core/skills/*)
+    $coreSkillsDir = Join-Path $DevKitRoot "core\skills"
+    if (Test-Path -Path $coreSkillsDir -PathType Container) {
+        $coreDirs = Get-ChildItem -Path $coreSkillsDir -Directory -ErrorAction SilentlyContinue
+        foreach ($cd in $coreDirs) {
+            $desc = Get-DevKitSkillDescription -SkillDir $cd.FullName
+            $usingProfiles = [System.Collections.Generic.List[string]]::new()
+            foreach ($pName in $profileMap.Keys) {
+                $pObj = $profileMap[$pName]
+                if ($pObj.skills -and ($pObj.skills -contains $cd.Name)) {
+                    $usingProfiles.Add($pName)
+                }
+            }
+
+            $skills.Add([PSCustomObject]@{
+                Name        = $cd.Name
+                Category    = "core"
+                Ownership   = "core"
+                Source      = "core"
+                Policy      = "trusted-core"
+                Ref         = $null
+                Subpath     = $null
+                License     = "internal"
+                Description = $desc
+                State       = "declared"
+                Profile     = $null
+                Profiles    = @($usingProfiles)
+                Path        = "core/skills/$($cd.Name)"
+            })
+        }
+    }
+
+    # 2. Profile-specific skills (under profiles/*/skills/*)
+    $profilesDir = Join-Path $DevKitRoot "profiles"
+    if (Test-Path -Path $profilesDir -PathType Container) {
+        $pDirs = Get-ChildItem -Path $profilesDir -Directory -ErrorAction SilentlyContinue
+        foreach ($pd in $pDirs) {
+            $pName = $pd.Name
+            $pObj = $profileMap[$pName]
+            $pSkillsDir = Join-Path $pd.FullName "skills"
+            if (Test-Path -Path $pSkillsDir -PathType Container) {
+                $pSkillDirs = Get-ChildItem -Path $pSkillsDir -Directory -ErrorAction SilentlyContinue
+                foreach ($psd in $pSkillDirs) {
+                    $desc = Get-DevKitSkillDescription -SkillDir $psd.FullName
+                    $isDeclared = ($null -ne $pObj -and $null -ne $pObj.skills -and ($pObj.skills -contains $psd.Name))
+                    $state = if ($isDeclared) { "declared" } else { "available" }
+                    $usingProfiles = if ($isDeclared) { @($pName) } else { @() }
+
+                    $skills.Add([PSCustomObject]@{
+                        Name        = $psd.Name
+                        Category    = "profile-specific"
+                        Ownership   = "profile-specific"
+                        Source      = "profile:$pName"
+                        Policy      = "profile-owned"
+                        Ref         = $null
+                        Subpath     = $null
+                        License     = "internal"
+                        Description = $desc
+                        State       = $state
+                        Profile     = $pName
+                        Profiles    = $usingProfiles
+                        Path        = "profiles/$pName/skills/$($psd.Name)"
+                    })
+                }
+            }
+        }
+    }
+
+    # 3. Third-party skills (from registry/third-party.json)
+    $tpReg = Get-DevKitThirdPartyRegistry -DevKitRoot $DevKitRoot
+    if ($tpReg -and $tpReg.registry) {
+        foreach ($prop in $tpReg.registry.PSObject.Properties) {
+            $tpName = $prop.Name
+            $tpItem = $prop.Value
+            $usingProfiles = [System.Collections.Generic.List[string]]::new()
+            foreach ($pName in $profileMap.Keys) {
+                $pObj = $profileMap[$pName]
+                if ($pObj.thirdPartySkills -and ($pObj.thirdPartySkills -contains $tpName)) {
+                    $usingProfiles.Add($pName)
+                }
+                elseif ($pObj.skills -and ($pObj.skills -contains $tpName)) {
+                    $usingProfiles.Add($pName)
+                }
+            }
+
+            $skills.Add([PSCustomObject]@{
+                Name        = $tpName
+                Category    = "third-party"
+                Ownership   = "third-party"
+                Source      = "third-party:github:$($tpItem.repo)@$($tpItem.ref)"
+                Policy      = if ($tpItem.policy) { $tpItem.policy } else { "data-only" }
+                Ref         = $tpItem.ref
+                Subpath     = $tpItem.subpath
+                License     = $tpItem.license
+                Description = $tpItem.description
+                State       = "registered"
+                Profile     = $null
+                Profiles    = @($usingProfiles)
+                Path        = "registry/third-party.json"
+            })
+        }
+    }
+
+    return $skills
+}
+
+function Get-DevKitSkillInfo {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SkillName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ProfileName = $null
+    )
+
+    $catalog = Get-DevKitSkillCatalog -DevKitRoot $DevKitRoot
+    $matches = @($catalog | Where-Object { $_.Name -eq $SkillName })
+
+    if ($matches.Count -eq 0) {
+        return $null
+    }
+
+    if ($matches.Count -gt 1 -and -not [string]::IsNullOrWhiteSpace($ProfileName)) {
+        $exact = $matches | Where-Object { $_.Profile -eq $ProfileName }
+        if ($exact) { return $exact }
+    }
+
+    return $matches[0]
+}
+
+function Add-DevKitProfileSkill {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SkillName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot
+    )
+
+    $profilePath = Join-Path $DevKitRoot "profiles\$ProfileName\profile.json"
+    if (-not (Test-Path -Path $profilePath -PathType Leaf)) {
+        throw "Profile '$ProfileName' does not exist at '$profilePath'."
+    }
+
+    $catalog = Get-DevKitSkillCatalog -DevKitRoot $DevKitRoot
+    $skillMatches = @($catalog | Where-Object { $_.Name -eq $SkillName })
+
+    if ($skillMatches.Count -eq 0) {
+        throw "Skill '$SkillName' is not known in DevKit catalog (core, profile-specific, or third-party)."
+    }
+
+    $matchedSkill = $skillMatches[0]
+    if ($skillMatches.Count -gt 1) {
+        $thisProfMatch = $skillMatches | Where-Object { $_.Profile -eq $ProfileName }
+        if ($thisProfMatch) {
+            $matchedSkill = $thisProfMatch
+        }
+    }
+
+    if ($matchedSkill.Category -eq "profile-specific" -and $matchedSkill.Profile -ne $ProfileName) {
+        throw "Skill '$SkillName' is profile-specific to '$($matchedSkill.Profile)' and cannot be added to '$ProfileName'. To share it, promote it to core."
+    }
+
+    $content = [System.IO.File]::ReadAllText($profilePath, [System.Text.Encoding]::UTF8)
+    $profileObj = $content | ConvertFrom-Json
+
+    $existingSkills = [System.Collections.Generic.List[string]]::new()
+    if ($profileObj.skills) {
+        foreach ($s in $profileObj.skills) { $existingSkills.Add($s) }
+    }
+
+    $existingTpSkills = [System.Collections.Generic.List[string]]::new()
+    if ($profileObj.thirdPartySkills) {
+        foreach ($s in $profileObj.thirdPartySkills) { $existingTpSkills.Add($s) }
+    }
+
+    if ($existingSkills.Contains($SkillName) -or $existingTpSkills.Contains($SkillName)) {
+        throw "Skill '$SkillName' is already declared in profile '$ProfileName'."
+    }
+
+    if ($matchedSkill.Category -eq "third-party") {
+        $existingTpSkills.Add($SkillName)
+    }
+    else {
+        $existingSkills.Add($SkillName)
+    }
+
+    $updatedProfile = [ordered]@{
+        name             = $profileObj.name
+        version          = $profileObj.version
+        description      = $profileObj.description
+        skills           = @($existingSkills)
+        hooks            = if ($profileObj.hooks) { @($profileObj.hooks) } else { @() }
+        thirdPartySkills = @($existingTpSkills)
+    }
+
+    $json = $updatedProfile | ConvertTo-Json -Depth 10
+    [System.IO.File]::WriteAllText($profilePath, $json + "`n", [System.Text.UTF8Encoding]::new($false))
+
+    return [PSCustomObject]@{
+        ProfileName = $ProfileName
+        SkillName   = $SkillName
+        Category    = $matchedSkill.Category
+        Action      = "added"
+        TargetList  = if ($matchedSkill.Category -eq "third-party") { "thirdPartySkills" } else { "skills" }
+        Message     = "Skill '$SkillName' added to profile '$ProfileName' ($($matchedSkill.Category))."
+    }
+}
+
+function Remove-DevKitProfileSkill {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SkillName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot
+    )
+
+    $profilePath = Join-Path $DevKitRoot "profiles\$ProfileName\profile.json"
+    if (-not (Test-Path -Path $profilePath -PathType Leaf)) {
+        throw "Profile '$ProfileName' does not exist at '$profilePath'."
+    }
+
+    $content = [System.IO.File]::ReadAllText($profilePath, [System.Text.Encoding]::UTF8)
+    $profileObj = $content | ConvertFrom-Json
+
+    $existingSkills = [System.Collections.Generic.List[string]]::new()
+    if ($profileObj.skills) {
+        foreach ($s in $profileObj.skills) { $existingSkills.Add($s) }
+    }
+
+    $existingTpSkills = [System.Collections.Generic.List[string]]::new()
+    if ($profileObj.thirdPartySkills) {
+        foreach ($s in $profileObj.thirdPartySkills) { $existingTpSkills.Add($s) }
+    }
+
+    $removedFrom = $null
+    if ($existingSkills.Contains($SkillName)) {
+        $existingSkills.Remove($SkillName) | Out-Null
+        $removedFrom = "skills"
+    }
+    elseif ($existingTpSkills.Contains($SkillName)) {
+        $existingTpSkills.Remove($SkillName) | Out-Null
+        $removedFrom = "thirdPartySkills"
+    }
+    else {
+        throw "Skill '$SkillName' is not declared in profile '$ProfileName'."
+    }
+
+    $updatedProfile = [ordered]@{
+        name             = $profileObj.name
+        version          = $profileObj.version
+        description      = $profileObj.description
+        skills           = @($existingSkills)
+        hooks            = if ($profileObj.hooks) { @($profileObj.hooks) } else { @() }
+        thirdPartySkills = @($existingTpSkills)
+    }
+
+    $json = $updatedProfile | ConvertTo-Json -Depth 10
+    [System.IO.File]::WriteAllText($profilePath, $json + "`n", [System.Text.UTF8Encoding]::new($false))
+
+    return [PSCustomObject]@{
+        ProfileName = $ProfileName
+        SkillName   = $SkillName
+        Action      = "removed"
+        RemovedFrom = $removedFrom
+        Message     = "Removed '$SkillName' from profile '$ProfileName'. Consumer files and lockfile are preserved; a future explicit reconciliation/prune operation may be needed for physical cleanup."
+    }
+}
+
 function Resolve-DevKitThirdParty {
     [CmdletBinding()]
     param(
@@ -979,4 +1384,10 @@ Export-ModuleMember -Function `
     Save-DevKitLock, `
     Test-DevKitProjectState, `
     Invoke-DevKitSync, `
-    Invoke-DevKitVerify
+    Invoke-DevKitVerify, `
+    Get-DevKitSkillCatalog, `
+    Get-DevKitSkillInfo, `
+    Get-DevKitProfileList, `
+    Get-DevKitProfile, `
+    Add-DevKitProfileSkill, `
+    Remove-DevKitProfileSkill

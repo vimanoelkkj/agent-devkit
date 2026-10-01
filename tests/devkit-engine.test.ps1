@@ -364,6 +364,169 @@ finally {
     Remove-Item -Path $tpProjectDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+Write-Host "`nTest 12: Skill catalog and inspection (Core, Profile-Specific, Third-Party)" -ForegroundColor Yellow
+
+$catalog = Get-DevKitSkillCatalog -DevKitRoot $devKitRoot
+Assert-True ($catalog.Count -ge 8) "Catalog contains all core, profile, and third-party skills"
+
+# Check core skill
+$coreItem = $catalog | Where-Object { $_.Name -eq "targeted-repo-search" }
+Assert-True ($null -ne $coreItem) "Finds targeted-repo-search in catalog"
+Assert-Equal $coreItem.Category "core" "Core skill has category 'core'"
+Assert-Equal $coreItem.Ownership "core" "Core skill has ownership 'core'"
+Assert-Equal $coreItem.Policy "trusted-core" "Core skill has policy 'trusted-core'"
+Assert-Equal $coreItem.State "declared" "Core skill has state 'declared'"
+
+# Check profile skill
+$profItem = $catalog | Where-Object { $_.Name -eq "rp-targeted-workflow" }
+Assert-True ($null -ne $profItem) "Finds rp-targeted-workflow in catalog"
+Assert-Equal $profItem.Category "profile-specific" "Profile skill has category 'profile-specific'"
+Assert-Equal $profItem.Ownership "profile-specific" "Profile skill has ownership 'profile-specific'"
+Assert-Equal $profItem.Profile "rp-doces" "Profile skill belongs to 'rp-doces'"
+Assert-Equal $profItem.Policy "profile-owned" "Profile skill has policy 'profile-owned'"
+Assert-Equal $profItem.State "declared" "Declared profile skill has state 'declared'"
+
+# Check third-party skill
+$tpItem = $catalog | Where-Object { $_.Name -eq "caveman" }
+Assert-True ($null -ne $tpItem) "Finds caveman in catalog"
+Assert-Equal $tpItem.Category "third-party" "Third-party skill has category 'third-party'"
+Assert-Equal $tpItem.Ownership "third-party" "Third-party skill has ownership 'third-party'"
+Assert-Equal $tpItem.Policy "data-only" "Third-party skill has policy 'data-only'"
+Assert-Equal $tpItem.License "Apache-2.0" "Third-party skill has license 'Apache-2.0'"
+Assert-Equal $tpItem.Ref "f5d729488caa8f6a5b6c8086fe2cccd3e8a63f91" "Third-party skill has immutable ref"
+
+# Check Get-DevKitSkillInfo
+$infoCore = Get-DevKitSkillInfo -SkillName "targeted-repo-search" -DevKitRoot $devKitRoot
+Assert-Equal $infoCore.Name "targeted-repo-search" "Get-DevKitSkillInfo resolves core skill"
+Assert-Equal $infoCore.Category "core" "Resolved skill is category core"
+
+$infoProf = Get-DevKitSkillInfo -SkillName "rp-targeted-workflow" -DevKitRoot $devKitRoot
+Assert-Equal $infoProf.Name "rp-targeted-workflow" "Get-DevKitSkillInfo resolves profile skill"
+Assert-Equal $infoProf.Profile "rp-doces" "Resolved skill is bound to profile"
+
+$infoTp = Get-DevKitSkillInfo -SkillName "caveman" -DevKitRoot $devKitRoot
+Assert-Equal $infoTp.Name "caveman" "Get-DevKitSkillInfo resolves third-party skill"
+
+$infoNull = Get-DevKitSkillInfo -SkillName "non-existent-skill" -DevKitRoot $devKitRoot
+Assert-True ($null -eq $infoNull) "Non-existent skill resolves to null"
+
+# Check Profile listing and showing
+$profList = Get-DevKitProfileList -DevKitRoot $devKitRoot
+Assert-True (@($profList).Count -ge 1) "Get-DevKitProfileList returns profiles"
+$rpDocesProf = $profList | Where-Object { $_.Name -eq "rp-doces" }
+Assert-True ($null -ne $rpDocesProf) "Profile list contains rp-doces"
+Assert-Equal $rpDocesProf.SkillsCount 3 "rp-doces has 3 declared skills"
+Assert-Equal $rpDocesProf.HooksCount 1 "rp-doces has 1 declared hook"
+
+$profObj = Get-DevKitProfile -ProfileName "rp-doces" -DevKitRoot $devKitRoot
+Assert-Equal $profObj.name "rp-doces" "Get-DevKitProfile parses rp-doces profile.json"
+Assert-Throws { Get-DevKitProfile -ProfileName "non-existent-profile" -DevKitRoot $devKitRoot } "Profile 'non-existent-profile' not found" "Throws on non-existent profile"
+
+
+Write-Host "`nTest 13: Profile add & remove declarative operations" -ForegroundColor Yellow
+
+$tempProfileDir = Join-Path $devKitRoot "profiles\test-temp-profile"
+New-Item -ItemType Directory -Path $tempProfileDir -Force | Out-Null
+$tempProfileSkillsDir = Join-Path $tempProfileDir "skills\local-tool"
+New-Item -ItemType Directory -Path $tempProfileSkillsDir -Force | Out-Null
+Set-Content -Path (Join-Path $tempProfileSkillsDir "SKILL.md") -Value "---\nname: local-tool\ndescription: A temporary local skill\n---\nLocal tool body"
+
+$initialProfileJson = [ordered]@{
+    name             = "test-temp-profile"
+    version          = "1.0.0"
+    description      = "Temporary profile for automated tests"
+    skills           = @()
+    hooks            = @()
+    thirdPartySkills = @()
+} | ConvertTo-Json -Depth 10
+
+Set-Content -Path (Join-Path $tempProfileDir "profile.json") -Value $initialProfileJson
+
+try {
+    # 13.1 Check undeclared profile-specific skill has state 'available'
+    $catBefore = Get-DevKitSkillCatalog -DevKitRoot $devKitRoot
+    $availSkill = $catBefore | Where-Object { $_.Name -eq "local-tool" }
+    Assert-True ($null -ne $availSkill) "Catalog detects physical profile-specific folder"
+    Assert-Equal $availSkill.Category "profile-specific" "Ownership is profile-specific"
+    Assert-Equal $availSkill.State "available" "Undeclared skill state is 'available'"
+    Assert-Equal $availSkill.Profiles.Count 0 "Undeclared skill is not yet declared in profile"
+
+    # 13.2 Add available profile-specific skill
+    $addLocal = Add-DevKitProfileSkill -ProfileName "test-temp-profile" -SkillName "local-tool" -DevKitRoot $devKitRoot
+    Assert-Equal $addLocal.Action "added" "Add available profile-specific skill succeeds"
+    Assert-Equal $addLocal.TargetList "skills" "Added to 'skills' array"
+
+    $pUpdated1 = Get-DevKitProfile -ProfileName "test-temp-profile" -DevKitRoot $devKitRoot
+    Assert-True ($pUpdated1.skills -contains "local-tool") "Profile now declares local-tool"
+
+    # State in catalog should now be 'declared'
+    $catAfter1 = Get-DevKitSkillCatalog -DevKitRoot $devKitRoot
+    $declaredSkill = $catAfter1 | Where-Object { $_.Name -eq "local-tool" }
+    Assert-Equal $declaredSkill.State "declared" "Skill state updated to 'declared'"
+    Assert-True ($declaredSkill.Profiles -contains "test-temp-profile") "Profile is registered in Profiles array"
+
+    # 13.3 Add core skill
+    $addCore = Add-DevKitProfileSkill -ProfileName "test-temp-profile" -SkillName "targeted-repo-search" -DevKitRoot $devKitRoot
+    Assert-Equal $addCore.Action "added" "Add core skill succeeds"
+    Assert-Equal $addCore.TargetList "skills" "Core skill added to 'skills' array"
+
+    # 13.4 Add third-party skill
+    $addTp = Add-DevKitProfileSkill -ProfileName "test-temp-profile" -SkillName "caveman" -DevKitRoot $devKitRoot
+    Assert-Equal $addTp.Action "added" "Add third-party skill succeeds"
+    Assert-Equal $addTp.TargetList "thirdPartySkills" "Third-party skill added to 'thirdPartySkills' array"
+
+    $pUpdated2 = Get-DevKitProfile -ProfileName "test-temp-profile" -DevKitRoot $devKitRoot
+    Assert-True ($pUpdated2.skills -contains "targeted-repo-search") "Profile declares targeted-repo-search"
+    Assert-True ($pUpdated2.thirdPartySkills -contains "caveman") "Profile declares caveman"
+
+    # 13.5 Duplicate skill rejection
+    Assert-Throws {
+        Add-DevKitProfileSkill -ProfileName "test-temp-profile" -SkillName "caveman" -DevKitRoot $devKitRoot
+    } "already declared" "Rejects duplicate third-party skill addition"
+
+    Assert-Throws {
+        Add-DevKitProfileSkill -ProfileName "test-temp-profile" -SkillName "targeted-repo-search" -DevKitRoot $devKitRoot
+    } "already declared" "Rejects duplicate core skill addition"
+
+    # 13.6 Non-existent skill rejection
+    Assert-Throws {
+        Add-DevKitProfileSkill -ProfileName "test-temp-profile" -SkillName "fake-missing-skill" -DevKitRoot $devKitRoot
+    } "not known in DevKit catalog" "Rejects unknown skill"
+
+    # 13.7 Cross-profile profile-specific skill rejection
+    Assert-Throws {
+        Add-DevKitProfileSkill -ProfileName "test-temp-profile" -SkillName "rp-targeted-workflow" -DevKitRoot $devKitRoot
+    } "profile-specific to 'rp-doces' and cannot be added" "Rejects profile-specific skill from another profile"
+
+    # 13.8 Remove third-party skill
+    $remTp = Remove-DevKitProfileSkill -ProfileName "test-temp-profile" -SkillName "caveman" -DevKitRoot $devKitRoot
+    Assert-Equal $remTp.Action "removed" "Remove third-party skill succeeds"
+    Assert-Equal $remTp.RemovedFrom "thirdPartySkills" "Removed from thirdPartySkills"
+    Assert-True ($remTp.Message.Contains("reconciliation/prune")) "Removal message contains reconciliation/prune advisory notice"
+
+    $pUpdated3 = Get-DevKitProfile -ProfileName "test-temp-profile" -DevKitRoot $devKitRoot
+    Assert-True (-not ($pUpdated3.thirdPartySkills -contains "caveman")) "caveman no longer in thirdPartySkills"
+
+    # 13.9 Remove core skill
+    $remCore = Remove-DevKitProfileSkill -ProfileName "test-temp-profile" -SkillName "targeted-repo-search" -DevKitRoot $devKitRoot
+    Assert-Equal $remCore.Action "removed" "Remove core skill succeeds"
+    Assert-Equal $remCore.RemovedFrom "skills" "Removed from skills"
+
+    # 13.10 Remove profile-specific skill does NOT delete physical folder
+    $remLocal = Remove-DevKitProfileSkill -ProfileName "test-temp-profile" -SkillName "local-tool" -DevKitRoot $devKitRoot
+    Assert-Equal $remLocal.Action "removed" "Remove local-tool succeeds"
+    Assert-True (Test-Path $tempProfileSkillsDir -PathType Container) "Physical folder for local-tool was NOT deleted on remove"
+    Assert-True (Test-Path (Join-Path $tempProfileSkillsDir "SKILL.md") -PathType Leaf) "Physical SKILL.md for local-tool was NOT deleted"
+
+    # 13.11 Remove non-declared skill rejection
+    Assert-Throws {
+        Remove-DevKitProfileSkill -ProfileName "test-temp-profile" -SkillName "caveman" -DevKitRoot $devKitRoot
+    } "not declared in profile" "Rejects removing skill not present in profile"
+}
+finally {
+    Remove-Item -Path $tempProfileDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 Write-Host "`n=== TEST SUMMARY ===" -ForegroundColor Cyan
 Write-Host "Passed: $passCount" -ForegroundColor Green
 Write-Host "Failed: $failCount" -ForegroundColor $(if ($failCount -gt 0) { "Red" } else { "DarkGray" })

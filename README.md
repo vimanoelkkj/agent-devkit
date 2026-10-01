@@ -81,15 +81,46 @@ agent-devkit/
 
 The CLI script `bin/agent-devkit.ps1` supports PowerShell 7+ (`pwsh`) as well as Windows PowerShell 5.1 (`powershell.exe`).
 
-### 1. List Available Components
+### 1. Catalog & Skill Management
 
-Inspect all cataloged core skills, core hooks, profile-specific skills/hooks, and registered third-party components:
+Query and inspect all cataloged skills (core, profile-specific, and third-party):
+
+```powershell
+# List all skills with ownership, state, policy, and profile associations
+.\bin\agent-devkit.ps1 skill list
+
+# Inspect detailed metadata, provenance, ref, and description for a specific skill
+.\bin\agent-devkit.ps1 skill info caveman
+.\bin\agent-devkit.ps1 skill info rp-targeted-workflow
+```
+
+### 2. Profile Composition Management
+
+Manage project profiles declaratively:
+
+```powershell
+# List available profiles with component counts
+.\bin\agent-devkit.ps1 profile list
+
+# Show detailed profile composition (declared and available skills, hooks)
+.\bin\agent-devkit.ps1 profile show rp-doces
+
+# Add a core, profile-specific, or third-party skill to a profile
+.\bin\agent-devkit.ps1 profile add rp-doces caveman
+
+# Remove a skill declaration from a profile (preserves local files and locks)
+.\bin\agent-devkit.ps1 profile remove rp-doces caveman
+```
+
+### 3. Overview of Available Components (Legacy)
+
+Inspect a high-level overview of core skills/hooks, profiles, and third-party registry:
 
 ```powershell
 .\bin\agent-devkit.ps1 list
 ```
 
-### 2. Verify Consumer Project Integrity
+### 4. Verify Consumer Project Integrity
 
 Compare the files in a consumer repository against its manifest/lockfile:
 

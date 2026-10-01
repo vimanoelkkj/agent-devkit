@@ -2,8 +2,17 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory = $false)]
-    [ValidateSet("sync", "verify", "list")]
+    [ValidateSet("sync", "verify", "list", "skill", "profile")]
     [string]$Command = "verify",
+
+    [Parameter(Position = 1, Mandatory = $false)]
+    [string]$Subcommand = $null,
+
+    [Parameter(Position = 2, Mandatory = $false)]
+    [string]$Target1 = $null,
+
+    [Parameter(Position = 3, Mandatory = $false)]
+    [string]$Target2 = $null,
 
     [Parameter(Mandatory = $false)]
     [string]$ProjectDir = (Get-Location).Path,
@@ -37,13 +46,155 @@ if (-not [string]::IsNullOrWhiteSpace($ManifestFile)) {
 
 Write-Host "agent-devkit v1.0.0" -ForegroundColor Cyan
 Write-Host "DevKit Root: $devKitRoot" -ForegroundColor DarkGray
-Write-Host "Project Dir: $ProjectDir" -ForegroundColor DarkGray
-if ($explicitManifest) {
-    Write-Host "Manifest:    $ManifestFile" -ForegroundColor DarkGray
+if ($Command -in @("sync", "verify")) {
+    Write-Host "Project Dir: $ProjectDir" -ForegroundColor DarkGray
+    if ($explicitManifest) {
+        Write-Host "Manifest:    $ManifestFile" -ForegroundColor DarkGray
+    }
 }
-Write-Host "Command:     $Command $(if ($DryRun) { '[DRY-RUN]' } else { '' })`n" -ForegroundColor DarkGray
+
+$cmdDisplay = if ($Subcommand) { "$Command $Subcommand $(if ($Target1) { $Target1 }) $(if ($Target2) { $Target2 })".Trim() } else { $Command }
+Write-Host "Command:     $cmdDisplay $(if ($DryRun) { '[DRY-RUN]' } else { '' })`n" -ForegroundColor DarkGray
 
 switch ($Command) {
+    "skill" {
+        $sub = if ([string]::IsNullOrWhiteSpace($Subcommand)) { "list" } else { $Subcommand.ToLowerInvariant() }
+        switch ($sub) {
+            "list" {
+                $catalog = Get-DevKitSkillCatalog -DevKitRoot $devKitRoot
+                Write-Host "=== DEV-KIT SKILL CATALOG ===" -ForegroundColor Yellow
+                $tableData = $catalog | ForEach-Object {
+                    [PSCustomObject]@{
+                        Name      = $_.Name
+                        Category  = $_.Category
+                        Ownership = $_.Ownership
+                        State     = $_.State
+                        Policy    = $_.Policy
+                        Profiles  = ($_.Profiles -join ", ")
+                        License   = $_.License
+                    }
+                }
+                $tableData | Format-Table -AutoSize
+            }
+            "info" {
+                if ([string]::IsNullOrWhiteSpace($Target1)) {
+                    Write-Error "Usage: agent-devkit.ps1 skill info <skillName>"
+                    exit 1
+                }
+                $info = Get-DevKitSkillInfo -SkillName $Target1 -DevKitRoot $devKitRoot
+                if ($null -eq $info) {
+                    Write-Error "Skill '$Target1' not found in DevKit catalog."
+                    exit 1
+                }
+                Write-Host "Skill:        $($info.Name)" -ForegroundColor Cyan
+                Write-Host "Category:     $($info.Category)"
+                Write-Host "Ownership:    $($info.Ownership)"
+                Write-Host "State:        $($info.State)"
+                Write-Host "Source:       $($info.Source)"
+                Write-Host "Policy:       $($info.Policy)"
+                Write-Host "License:      $($info.License)"
+                if ($info.Ref) {
+                    Write-Host "Ref (Commit): $($info.Ref)"
+                }
+                if ($info.Subpath) {
+                    Write-Host "Subpath:      $($info.Subpath)"
+                }
+                Write-Host "Path:         $($info.Path)"
+                Write-Host "Profiles:     $($info.Profiles -join ', ')"
+                if ($info.Description) {
+                    Write-Host "`nDescription:`n  $($info.Description)" -ForegroundColor DarkGray
+                }
+            }
+            default {
+                Write-Error "Unknown skill subcommand '$Subcommand'. Available: list, info"
+                exit 1
+            }
+        }
+    }
+
+    "profile" {
+        $sub = if ([string]::IsNullOrWhiteSpace($Subcommand)) { "list" } else { $Subcommand.ToLowerInvariant() }
+        switch ($sub) {
+            "list" {
+                $profiles = Get-DevKitProfileList -DevKitRoot $devKitRoot
+                Write-Host "=== DEV-KIT PROFILES ===" -ForegroundColor Yellow
+                $tableData = $profiles | ForEach-Object {
+                    [PSCustomObject]@{
+                        Profile     = $_.Name
+                        Version     = $_.Version
+                        Skills      = $_.SkillsCount
+                        ThirdParty  = $_.ThirdPartyCount
+                        Hooks       = $_.HooksCount
+                        Available   = $_.AvailableCount
+                        Description = $_.Description
+                    }
+                }
+                $tableData | Format-Table -AutoSize
+            }
+            "show" {
+                if ([string]::IsNullOrWhiteSpace($Target1)) {
+                    Write-Error "Usage: agent-devkit.ps1 profile show <profileName>"
+                    exit 1
+                }
+                $pObj = Get-DevKitProfile -ProfileName $Target1 -DevKitRoot $devKitRoot
+                Write-Host "Profile:     $($pObj.name) (v$($pObj.version))" -ForegroundColor Green
+                Write-Host "Description: $($pObj.description)" -ForegroundColor DarkGray
+
+                Write-Host "`nDeclared Skills:" -ForegroundColor Cyan
+                $catalog = Get-DevKitSkillCatalog -DevKitRoot $devKitRoot
+                if ($pObj.skills) {
+                    foreach ($s in $pObj.skills) {
+                        $cEntry = $catalog | Where-Object { $_.Name -eq $s }
+                        $cat = if ($cEntry) { $cEntry.Category } else { "unknown" }
+                        Write-Host "  - $s ($cat)"
+                    }
+                }
+                if ($pObj.thirdPartySkills) {
+                    foreach ($t in $pObj.thirdPartySkills) {
+                        Write-Host "  - $t (third-party)"
+                    }
+                }
+
+                $declared = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                if ($pObj.skills) { foreach ($s in $pObj.skills) { $declared.Add($s) | Out-Null } }
+                $availableSkills = $catalog | Where-Object { $_.Category -eq "profile-specific" -and $_.Profile -eq $Target1 -and (-not $declared.Contains($_.Name)) }
+                if ($availableSkills) {
+                    Write-Host "`nAvailable Skills (undeclared in profile.json):" -ForegroundColor Yellow
+                    foreach ($as in $availableSkills) {
+                        Write-Host "  - $($as.Name) (profile-specific, available)"
+                    }
+                }
+
+                Write-Host "`nDeclared Hooks:" -ForegroundColor Cyan
+                if ($pObj.hooks) {
+                    foreach ($h in $pObj.hooks) {
+                        Write-Host "  - $h"
+                    }
+                }
+            }
+            "add" {
+                if ([string]::IsNullOrWhiteSpace($Target1) -or [string]::IsNullOrWhiteSpace($Target2)) {
+                    Write-Error "Usage: agent-devkit.ps1 profile add <profileName> <skillName>"
+                    exit 1
+                }
+                $res = Add-DevKitProfileSkill -ProfileName $Target1 -SkillName $Target2 -DevKitRoot $devKitRoot
+                Write-Host "SUCCESS: $($res.Message)" -ForegroundColor Green
+            }
+            "remove" {
+                if ([string]::IsNullOrWhiteSpace($Target1) -or [string]::IsNullOrWhiteSpace($Target2)) {
+                    Write-Error "Usage: agent-devkit.ps1 profile remove <profileName> <skillName>"
+                    exit 1
+                }
+                $res = Remove-DevKitProfileSkill -ProfileName $Target1 -SkillName $Target2 -DevKitRoot $devKitRoot
+                Write-Host "SUCCESS: $($res.Message)" -ForegroundColor Yellow
+            }
+            default {
+                Write-Error "Unknown profile subcommand '$Subcommand'. Available: list, show, add, remove"
+                exit 1
+            }
+        }
+    }
+
     "list" {
         Write-Host "=== CORE SKILLS ===" -ForegroundColor Yellow
         $coreSkills = Get-ChildItem -Path (Join-Path $devKitRoot "core\skills") -Directory -ErrorAction SilentlyContinue
