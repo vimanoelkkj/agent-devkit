@@ -1,0 +1,30 @@
+{
+  "profile": "rp-doces",
+  "skills": [
+    "targeted-repo-search",
+    "targeted-validation",
+    "minimal-diff",
+    "efficient-coding-workflow",
+    "rp-targeted-workflow",
+    "money-test",
+    "new-migration"
+  ],
+  "hooks": [
+    "hook-io.mjs",
+    "session-scratch.mjs",
+    "secret-scan.mjs",
+    "guard-git-destructive.mjs",
+    "large-file-warning.mjs",
+    "set-files-changed.mjs",
+    "guard-applied-migrations.mjs",
+    "guard-d1-remote.mjs"
+  ],
+  "targets": {
+    "skills": [
+      ".claude/skills"
+    ],
+    "hooks": [
+      ".claude/hooks"
+    ]
+  }
+}

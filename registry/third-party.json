@@ -1,0 +1,26 @@
+{
+  "version": "1.0.0",
+  "registry": {
+    "graphify": {
+      "description": "Knowledge graph extraction and navigation for coding agents",
+      "type": "github",
+      "repo": "JuliusBrussee/caveman",
+      "ref": "a8f3b20c4e1234567890abcdef1234567890abcd",
+      "subpath": "skills/graphify",
+      "license": "MIT",
+      "policy": "data-only",
+      "allowedFiles": [
+        "*.md",
+        ".graphify_version"
+      ],
+      "disallowedExtensions": [
+        ".exe",
+        ".bat",
+        ".cmd",
+        ".ps1",
+        ".sh",
+        ".dll"
+      ]
+    }
+  }
+}
