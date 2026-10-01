@@ -21,7 +21,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $devKitRoot = Split-Path -Parent $scriptDir
 
 $modulePath = Join-Path $devKitRoot "src\DevKit.Engine.psm1"
-Import-Module $modulePath -Force
+Import-Module $modulePath -Force -DisableNameChecking
 
 $ProjectDir = (Resolve-Path $ProjectDir).Path
 
@@ -74,6 +74,19 @@ switch ($Command) {
                 foreach ($ph in $pHooks) {
                     Write-Host "      - $($ph.Name)"
                 }
+            }
+        }
+
+        Write-Host "`n=== THIRD-PARTY REGISTRY ===" -ForegroundColor Yellow
+        $tpReg = Get-DevKitThirdPartyRegistry -DevKitRoot $devKitRoot
+        if ($tpReg -and $tpReg.registry) {
+            foreach ($prop in $tpReg.registry.PSObject.Properties) {
+                $item = $prop.Value
+                Write-Host "  $($prop.Name)" -ForegroundColor Cyan
+                Write-Host "    Source:  $($item.type):$($item.repo)@$($item.ref)" -ForegroundColor DarkGray
+                Write-Host "    Subpath: $($item.subpath)" -ForegroundColor DarkGray
+                Write-Host "    Policy:  $($item.policy)" -ForegroundColor DarkGray
+                Write-Host "    License: $($item.license)" -ForegroundColor DarkGray
             }
         }
     }

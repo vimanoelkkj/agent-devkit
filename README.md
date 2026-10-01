@@ -22,12 +22,14 @@ The architecture separates responsibilities into four clear layers:
    - Profile definitions (`profile.json`) curate skills, hooks, and configurations for downstream projects.
 
 3. **Third-Party Registry (`registry/third-party.json`)**
-   - Catalog of external components pinned to immutable Git commits or release tags.
+   - Catalog of external components pinned to immutable, full 40-character Git commit hashes.
    - Adheres to a strict **data-only policy**: third-party dependencies are cataloged for declarative installation without arbitrary code execution during synchronization.
+   - Fetched safely via native `git.exe` into an isolated temporary sandbox with custom hooks disabled (`core.hooksPath=""`).
+   - Validates `git rev-parse HEAD` against the pinned commit, verifies subpaths, and enforces security constraints (anti-traversal, reparse-point rejection, script/binary extension blocking).
 
 4. **Consumer Manifest & Lockfile (`agent-devkit.json` & `agent-devkit.lock`)**
    - Consumer projects declare desired profile, skills, and hooks in `agent-devkit.json`.
-   - The engine generates `agent-devkit.lock` recording exact SHA-256 checksums and source origins for every materialized file.
+   - The engine generates `agent-devkit.lock` recording exact SHA-256 checksums, full commit references, repository origin, and subpaths for every materialized file.
    - Physical copies are materialized independently into agent discovery directories (e.g., `.agents/skills`, `.claude/skills`, and `.claude/hooks`).
 
 ---
@@ -114,6 +116,41 @@ Materialize missing components into the target project safely:
 # Materialize components and generate/update agent-devkit.lock
 .\bin\agent-devkit.ps1 sync -ProjectDir "C:\path\to\project"
 ```
+
+---
+
+## Third-Party Component Pipeline & Security Model
+
+Third-party dependencies (such as external community skills) are managed through declarative pinning and a multi-layered security pipeline:
+
+```text
+registry/third-party.json
+         ↓
+Isolated temporary sandbox (%TEMP%\devkit-tp-git-<guid>)
+         ↓
+git.exe shallow fetch (-c core.hooksPath="")
+         ↓
+Deterministic commit validation (git rev-parse HEAD == expected_commit_sha)
+         ↓
+Package security audit:
+  - Subpath existence & path-traversal prevention
+  - Reparse point / directory junction / symlink rejection
+  - Data-only extension allowlist (.md, .txt, .json, .yaml, .yml)
+  - Forbidden extension blocklist (.exe, .bat, .ps1, .sh, .js, .mjs, etc.)
+         ↓
+SHA-256 hash calculation of staging tree
+         ↓
+Materialization into consumer directories (.agents/skills, .claude/skills)
+         ↓
+Lockfile update (agent-devkit.lock with full 40-char SHA & file digests)
+         ↓
+Sandbox cleanup (guaranteed in finally block)
+```
+
+### Verified Integrations
+
+- **`caveman`**: Verified integration against `JuliusBrussee/caveman` at commit `f5d729488caa8f6a5b6c8086fe2cccd3e8a63f91`, subpath `skills/caveman`.
+- **Note on `graphify`**: Upstream `Graphify-Labs/graphify` generates skills dynamically via Python tooling (`tools/skillgen/gen.py`) rather than storing static directories. Integration requires generator pipeline support and is deferred to a future milestone.
 
 ---
 

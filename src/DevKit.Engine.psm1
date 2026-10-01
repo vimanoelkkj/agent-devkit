@@ -107,6 +107,274 @@ function Resolve-DevKitHook {
     }
 }
 
+function Get-DevKitThirdPartyRegistry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot
+    )
+
+    $registryPath = Join-Path $DevKitRoot "registry\third-party.json"
+    if (Test-Path -Path $registryPath -PathType Leaf) {
+        $content = [System.IO.File]::ReadAllText($registryPath, [System.Text.Encoding]::UTF8)
+        return $content | ConvertFrom-Json
+    }
+    return $null
+}
+
+function Resolve-DevKitThirdParty {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ComponentName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot
+    )
+
+    $reg = Get-DevKitThirdPartyRegistry -DevKitRoot $DevKitRoot
+    if ($null -eq $reg -or $null -eq $reg.registry) {
+        return $null
+    }
+
+    $entry = $reg.registry.$ComponentName
+    if ($null -eq $entry) {
+        return $null
+    }
+
+    # Validate provider
+    if ($entry.type -ne "github") {
+        throw "Unsupported provider '$($entry.type)' for third-party component '$ComponentName'. Only 'github' is currently supported."
+    }
+
+    # Validate repo format: owner/repo
+    if ($entry.repo -notmatch '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$') {
+        throw "Invalid repository format '$($entry.repo)' in third-party entry '$ComponentName'."
+    }
+
+    # Validate ref
+    if ([string]::IsNullOrWhiteSpace($entry.ref) -or $entry.ref -notmatch '^[a-zA-Z0-9_.-]+$') {
+        throw "Invalid ref '$($entry.ref)' in third-party entry '$ComponentName'."
+    }
+
+    # Validate subpath
+    if ([string]::IsNullOrWhiteSpace($entry.subpath)) {
+        throw "Missing subpath in third-party entry '$ComponentName'."
+    }
+    if ($entry.subpath -match '^[\\/]' -or $entry.subpath -match '^[a-zA-Z]:' -or $entry.subpath -like '*..*') {
+        throw "Path traversal detected in declared subpath '$($entry.subpath)' for third-party entry '$ComponentName'."
+    }
+
+    return $entry
+}
+
+function Test-DevKitPackageSecurity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Policy = "data-only",
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$AllowedExtensions = @(".md", ".txt", ".json", ".yaml", ".yml"),
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$DisallowedExtensions = @(".exe", ".bat", ".cmd", ".ps1", ".sh", ".js", ".mjs", ".cjs", ".dll", ".so", ".dylib", ".py", ".rb")
+    )
+
+    if (-not (Test-Path -Path $Path -PathType Container)) {
+        throw "Package path does not exist or is not a directory: $Path"
+    }
+
+    $rootItem = Get-Item -LiteralPath $Path -Force
+    $isRootReparse = ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint
+    if ($isRootReparse) {
+        throw "Symlink or reparse point detected in third-party package: $($rootItem.FullName)"
+    }
+
+    $normRoot = (Resolve-Path $Path).Path.TrimEnd('\', '/')
+    $allItems = Get-ChildItem -LiteralPath $Path -Recurse -Force
+
+    foreach ($item in $allItems) {
+        # Check reparse point / symlink
+        $isReparsePoint = ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint
+        if ($isReparsePoint) {
+            throw "Symlink or reparse point detected in third-party package: $($item.FullName)"
+        }
+
+        # Check path traversal: full name must stay strictly inside normRoot
+        $itemNorm = $item.FullName
+        if (-not $itemNorm.StartsWith($normRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -and $itemNorm -ne $normRoot) {
+            throw "Path traversal detected outside package root: $itemNorm"
+        }
+
+        if (-not $item.PSIsContainer) {
+            $ext = [System.IO.Path]::GetExtension($item.Name).ToLowerInvariant()
+
+            # Disallowed check
+            if ($null -ne $DisallowedExtensions -and $DisallowedExtensions.Length -gt 0) {
+                if ($DisallowedExtensions -contains $ext) {
+                    throw "Forbidden file extension '$ext' detected in file '$($item.Name)' under policy '$Policy'."
+                }
+            }
+
+            # Allowed check if data-only
+            if ($Policy -eq "data-only" -and $null -ne $AllowedExtensions -and $AllowedExtensions.Length -gt 0) {
+                if (-not ($AllowedExtensions -contains $ext)) {
+                    throw "File extension '$ext' in '$($item.Name)' is not permitted under policy '$Policy'."
+                }
+            }
+        }
+    }
+}
+
+function Fetch-DevKitThirdParty {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ComponentName,
+
+        [Parameter(Mandatory = $true)]
+        [psobject]$RegistryEntry,
+
+        [Parameter(Mandatory = $false)]
+        [string]$MockDir = $null
+    )
+
+    $gitCmd = Get-Command "git.exe" -ErrorAction SilentlyContinue
+    if ($null -eq $gitCmd) {
+        throw "git.exe is required for third-party component acquisition, but was not found in PATH."
+    }
+
+    $repo = $RegistryEntry.repo
+    $ref = $RegistryEntry.ref
+    $subpath = $RegistryEntry.subpath
+    $policy = if ($RegistryEntry.policy) { $RegistryEntry.policy } else { "data-only" }
+    $allowed = if ($RegistryEntry.allowedExtensions) { @($RegistryEntry.allowedExtensions) } else { @(".md", ".txt", ".json", ".yaml", ".yml") }
+    $disallowed = if ($RegistryEntry.disallowedExtensions) { @($RegistryEntry.disallowedExtensions) } else { @(".exe", ".bat", ".cmd", ".ps1", ".sh", ".js", ".mjs", ".cjs", ".dll", ".so", ".dylib", ".py", ".rb") }
+
+    $tempBase = Join-Path ([System.IO.Path]::GetTempPath()) "devkit-tp-git-$([Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $tempBase -Force | Out-Null
+
+    try {
+        $resolvedCommitSha = $ref
+
+        if (-not [string]::IsNullOrWhiteSpace($MockDir)) {
+            if (-not (Test-Path $MockDir -PathType Container)) {
+                throw "Specified mock directory not found: $MockDir"
+            }
+            Copy-Item -Path "$MockDir\*" -Destination $tempBase -Recurse -Force
+        }
+        else {
+            $remoteUrl = "https://github.com/$repo.git"
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+
+            try {
+                # 1. Initialize temporary isolated repository
+                $initOut = (& $gitCmd.Source -c "core.hooksPath=" init $tempBase 2>&1) | Out-String
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to initialize git sandbox for '$ComponentName': $initOut"
+                }
+
+                # 2. Add remote
+                $remoteOut = (& $gitCmd.Source -c "core.hooksPath=" -C $tempBase remote add origin $remoteUrl 2>&1) | Out-String
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to configure git remote for '$ComponentName': $remoteOut"
+                }
+
+                # 3. Fetch shallow commit without running hooks
+                $fetchOut = (& $gitCmd.Source -c "core.hooksPath=" -C $tempBase fetch --depth 1 origin $ref 2>&1) | Out-String
+                if ($LASTEXITCODE -ne 0) {
+                    # Fallback: fetch tag
+                    $fetchOut = (& $gitCmd.Source -c "core.hooksPath=" -C $tempBase fetch --depth 1 origin "+refs/tags/$ref:refs/tags/$ref" 2>&1) | Out-String
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Failed to fetch ref '$ref' from '$remoteUrl' for '$ComponentName': $fetchOut"
+                    }
+                }
+
+                # 4. Checkout detached HEAD without running hooks
+                $checkoutOut = (& $gitCmd.Source -c "core.hooksPath=" -c "advice.detachedHead=false" -C $tempBase checkout --force $ref 2>&1) | Out-String
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to checkout ref '$ref' for '$ComponentName': $checkoutOut"
+                }
+
+                # 5. Mandatory validation: git rev-parse HEAD
+                $headOut = (& $gitCmd.Source -c "core.hooksPath=" -C $tempBase rev-parse HEAD 2>&1) | Out-String
+                if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($headOut)) {
+                    throw "Failed to resolve HEAD commit SHA for '$ComponentName': $headOut"
+                }
+                $resolvedCommitSha = $headOut.Trim().ToLowerInvariant()
+
+                # If $ref is a full 40-character commit SHA, verify exact match
+                if ($ref -match '^[a-fA-F0-9]{40}$') {
+                    if ($resolvedCommitSha -ne $ref.ToLowerInvariant()) {
+                        throw "Commit SHA verification failed for '$ComponentName': expected '$ref', resolved '$resolvedCommitSha'"
+                    }
+                }
+            }
+            finally {
+                $ErrorActionPreference = $prevEap
+            }
+        }
+
+        # 6. Validate subpath
+        $normSubpath = $subpath.Replace('/', [System.IO.Path]::DirectorySeparatorChar).Replace('\', [System.IO.Path]::DirectorySeparatorChar).TrimStart([System.IO.Path]::DirectorySeparatorChar)
+        $targetSubpathDir = Join-Path $tempBase $normSubpath
+
+        if (-not (Test-Path $targetSubpathDir -PathType Container)) {
+            throw "Subpath '$subpath' does not exist in repository '$repo' at ref '$ref'."
+        }
+
+        # 7. Anti-traversal check: verify resolved path starts with tempBase root
+        $resolvedRepoRoot = (Resolve-Path $tempBase).Path.TrimEnd('\', '/')
+        $resolvedSubpath = (Resolve-Path $targetSubpathDir).Path
+        if (-not $resolvedSubpath.StartsWith($resolvedRepoRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -and $resolvedSubpath -ne $resolvedRepoRoot) {
+            throw "Path traversal detected in subpath '$subpath' escaping repository root."
+        }
+
+        # 8. Test package security (symlinks/reparse points, allowed/disallowed extensions, policy)
+        Test-DevKitPackageSecurity -Path $resolvedSubpath -Policy $policy -AllowedExtensions $allowed -DisallowedExtensions $disallowed
+
+        # 9. Compute SHA-256 for all approved files
+        $files = @{}
+        $subpathFiles = Get-ChildItem -Path $resolvedSubpath -Recurse -File
+        $subpathPrefix = $resolvedSubpath.TrimEnd('\', '/')
+
+        foreach ($file in $subpathFiles) {
+            $relPath = $file.FullName.Substring($subpathPrefix.Length).TrimStart('\', '/').Replace('\', '/')
+            $hash = Get-DevKitSha256 -Path $file.FullName
+            $files[$relPath] = @{
+                sha256     = $hash
+                length     = $file.Length
+                sourcePath = $file.FullName
+            }
+        }
+
+        return @{
+            skillName     = $ComponentName
+            source        = "third-party:github:$repo@$resolvedCommitSha"
+            repo          = $repo
+            ref           = $resolvedCommitSha
+            subpath       = $subpath
+            policy        = $policy
+            license       = $RegistryEntry.license
+            sourceDir     = $resolvedSubpath
+            tempBase      = $tempBase
+            files         = $files
+            isThirdParty  = $true
+        }
+    }
+    catch {
+        if (Test-Path $tempBase) {
+            Remove-Item -Path $tempBase -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+}
+
 function Get-DevKitManifest {
     [CmdletBinding()]
     param(
@@ -224,6 +492,16 @@ function Test-DevKitProjectState {
             }
         }
     }
+    if ($Manifest.thirdPartySkills) {
+        foreach ($s in $Manifest.thirdPartySkills) {
+            if (-not $requestedSkills.Contains($s)) { $requestedSkills.Add($s) }
+        }
+    }
+    if ($Manifest.thirdParty) {
+        foreach ($s in $Manifest.thirdParty) {
+            if (-not $requestedSkills.Contains($s)) { $requestedSkills.Add($s) }
+        }
+    }
 
     # Extract requested hooks
     $requestedHooks = [System.Collections.Generic.List[string]]::new()
@@ -240,24 +518,81 @@ function Test-DevKitProjectState {
         }
     }
 
-    # 1. Process Skills
+    # 1. Process Skills (Core, Profile, and Third-Party)
     foreach ($skillName in $requestedSkills) {
         $resolved = Resolve-DevKitComponent -SkillName $skillName -ProfileName $profile -DevKitRoot $DevKitRoot
+        $isThirdParty = $false
+
+        if ($null -eq $resolved) {
+            # Check third-party registry
+            $tpEntry = Resolve-DevKitThirdParty -ComponentName $skillName -DevKitRoot $DevKitRoot
+            if ($null -ne $tpEntry) {
+                $isThirdParty = $true
+                $lockSkill = $null
+                if ($null -ne $Lock -and $null -ne $Lock.skills) {
+                    $lockSkill = $Lock.skills.$skillName
+                }
+
+                # Check if all target files already exist and match lock hashes
+                $needFetch = ($null -eq $lockSkill -or $null -eq $lockSkill.files)
+                if (-not $needFetch) {
+                    foreach ($targetBase in $skillTargets) {
+                        $targetSkillDir = Join-Path $ProjectDir (Join-Path $targetBase $skillName)
+                        foreach ($prop in $lockSkill.files.PSObject.Properties) {
+                            $targetFile = Join-Path $targetSkillDir $prop.Name.Replace('/', '\')
+                            if (-not (Test-Path $targetFile -PathType Leaf)) {
+                                $needFetch = $true
+                                break
+                            }
+                        }
+                        if ($needFetch) { break }
+                    }
+                }
+
+                if ($needFetch) {
+                    $resolved = Fetch-DevKitThirdParty -ComponentName $skillName -RegistryEntry $tpEntry
+                }
+                else {
+                    $files = @{}
+                    foreach ($prop in $lockSkill.files.PSObject.Properties) {
+                        $files[$prop.Name] = @{
+                            sha256 = $prop.Value.sha256
+                        }
+                    }
+                    $resolved = @{
+                        skillName    = $skillName
+                        source       = $lockSkill.source
+                        repo         = $lockSkill.repo
+                        ref          = $lockSkill.ref
+                        subpath      = $lockSkill.subpath
+                        policy       = $lockSkill.policy
+                        license      = $lockSkill.license
+                        files        = $files
+                        sourceDir    = $null
+                        tempBase     = $null
+                        isThirdParty = $true
+                    }
+                }
+            }
+        }
+
         if ($null -eq $resolved) {
             $results.Add([PSCustomObject]@{
-                Type        = "skill"
-                Component   = $skillName
-                Skill       = $skillName
-                File        = "*"
-                Target      = "*"
-                TargetPath  = $null
-                Source      = $null
-                SourcePath  = $null
-                Status      = "unresolved"
-                SourceHash  = $null
-                LockHash    = $null
-                TargetHash  = $null
-                Description = "Skill not found in DevKit core or profile $profile"
+                Type         = "skill"
+                Component    = $skillName
+                Skill        = $skillName
+                File         = "*"
+                Target       = "*"
+                TargetPath   = $null
+                Source       = $null
+                SourcePath   = $null
+                Status       = "unresolved"
+                SourceHash   = $null
+                LockHash     = $null
+                TargetHash   = $null
+                Description  = "Skill not found in DevKit core, profile $profile, or third-party registry"
+                IsThirdParty = $false
+                TempBase     = $null
             })
             continue
         }
@@ -326,21 +661,29 @@ function Test-DevKitProjectState {
                 }
 
                 $targetDisplay = Join-Path $targetBase (Join-Path $skillName $relFile).Replace('\', '/')
+                $sourcePath = if ($resolved.sourceDir) { Join-Path $resolved.sourceDir $relFile.Replace('/', '\') } else { $null }
 
                 $results.Add([PSCustomObject]@{
-                    Type        = "skill"
-                    Component   = $skillName
-                    Skill       = $skillName
-                    File        = $relFile
-                    Target      = $targetDisplay
-                    TargetPath  = $targetFile
-                    Source      = $resolved.source
-                    SourcePath  = Join-Path $resolved.sourceDir $relFile.Replace('/', '\')
-                    Status      = $status
-                    SourceHash  = $sourceHash
-                    LockHash    = $lockHash
-                    TargetHash  = $targetHash
-                    Description = $description
+                    Type         = "skill"
+                    Component    = $skillName
+                    Skill        = $skillName
+                    File         = $relFile
+                    Target       = $targetDisplay
+                    TargetPath   = $targetFile
+                    Source       = $resolved.source
+                    SourcePath   = $sourcePath
+                    Status       = $status
+                    SourceHash   = $sourceHash
+                    LockHash     = $lockHash
+                    TargetHash   = $targetHash
+                    Description  = $description
+                    IsThirdParty = [bool]$resolved.isThirdParty
+                    Repo         = $resolved.repo
+                    Ref          = $resolved.ref
+                    Subpath      = $resolved.subpath
+                    Policy       = $resolved.policy
+                    License      = $resolved.license
+                    TempBase     = $resolved.tempBase
                 })
             }
         }
@@ -351,19 +694,21 @@ function Test-DevKitProjectState {
         $resolved = Resolve-DevKitHook -HookName $hookName -ProfileName $profile -DevKitRoot $DevKitRoot
         if ($null -eq $resolved) {
             $results.Add([PSCustomObject]@{
-                Type        = "hook"
-                Component   = $hookName
-                Skill       = $hookName
-                File        = $hookName
-                Target      = "*"
-                TargetPath  = $null
-                Source      = $null
-                SourcePath  = $null
-                Status      = "unresolved"
-                SourceHash  = $null
-                LockHash    = $null
-                TargetHash  = $null
-                Description = "Hook not found in DevKit core or profile $profile"
+                Type         = "hook"
+                Component    = $hookName
+                Skill        = $hookName
+                File         = $hookName
+                Target       = "*"
+                TargetPath   = $null
+                Source       = $null
+                SourcePath   = $null
+                Status       = "unresolved"
+                SourceHash   = $null
+                LockHash     = $null
+                TargetHash   = $null
+                Description  = "Hook not found in DevKit core or profile $profile"
+                IsThirdParty = $false
+                TempBase     = $null
             })
             continue
         }
@@ -425,19 +770,21 @@ function Test-DevKitProjectState {
             $targetDisplay = Join-Path $targetBase $hookName.Replace('\', '/')
 
             $results.Add([PSCustomObject]@{
-                Type        = "hook"
-                Component   = $hookName
-                Skill       = $hookName
-                File        = $hookName
-                Target      = $targetDisplay
-                TargetPath  = $targetFile
-                Source      = $resolved.source
-                SourcePath  = $sourcePath
-                Status      = $status
-                SourceHash  = $sourceHash
-                LockHash    = $lockHash
-                TargetHash  = $targetHash
-                Description = $description
+                Type         = "hook"
+                Component    = $hookName
+                Skill        = $hookName
+                File         = $hookName
+                Target       = $targetDisplay
+                TargetPath   = $targetFile
+                Source       = $resolved.source
+                SourcePath   = $sourcePath
+                Status       = $status
+                SourceHash   = $sourceHash
+                LockHash     = $lockHash
+                TargetHash   = $targetHash
+                Description  = $description
+                IsThirdParty = $false
+                TempBase     = $null
             })
         }
     }
@@ -479,78 +826,100 @@ function Invoke-DevKitSync {
     $newLockSkills = @{}
     $newLockHooks = @{}
 
-    foreach ($item in $state) {
-        if ($item.Type -eq "hook") {
-            $hookName = $item.Component
-            if (-not $newLockHooks.ContainsKey($hookName)) {
-                $newLockHooks[$hookName] = @{
-                    source = $item.Source
-                    sha256 = $item.SourceHash
-                }
-            }
-        }
-        else {
-            $skillName = $item.Skill
-            if (-not $newLockSkills.ContainsKey($skillName)) {
-                $newLockSkills[$skillName] = @{
-                    source  = $item.Source
-                    version = "1.0.0"
-                    files   = @{}
-                }
-            }
-
-            if ($null -ne $item.File -and $item.File -ne "*") {
-                $newLockSkills[$skillName].files[$item.File] = @{
-                    sha256 = $item.SourceHash
-                }
-            }
-        }
-
-        switch ($item.Status) {
-            "synced" {
-                $syncedCount++
-            }
-            "missing" {
-                $missingCount++
-                if (-not $DryRun) {
-                    $targetDir = [System.IO.Path]::GetDirectoryName($item.TargetPath)
-                    if (-not (Test-Path -Path $targetDir)) {
-                        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+    try {
+        foreach ($item in $state) {
+            if ($item.Type -eq "hook") {
+                $hookName = $item.Component
+                if (-not $newLockHooks.ContainsKey($hookName)) {
+                    $newLockHooks[$hookName] = @{
+                        source = $item.Source
+                        sha256 = $item.SourceHash
                     }
-                    Copy-Item -Path $item.SourcePath -Destination $item.TargetPath
-                    $materializedCount++
                 }
             }
-            "update_available" {
-                if (-not $DryRun) {
-                    Copy-Item -Path $item.SourcePath -Destination $item.TargetPath
-                    $materializedCount++
+            else {
+                $skillName = $item.Skill
+                if (-not $newLockSkills.ContainsKey($skillName)) {
+                    $skillEntry = @{
+                        source  = $item.Source
+                        version = "1.0.0"
+                        files   = @{}
+                    }
+                    if ($item.IsThirdParty) {
+                        $skillEntry["repo"] = $item.Repo
+                        $skillEntry["ref"] = $item.Ref
+                        $skillEntry["subpath"] = $item.Subpath
+                        $skillEntry["policy"] = $item.Policy
+                        $skillEntry["license"] = $item.License
+                    }
+                    $newLockSkills[$skillName] = $skillEntry
+                }
+
+                if ($null -ne $item.File -and $item.File -ne "*") {
+                    $newLockSkills[$skillName].files[$item.File] = @{
+                        sha256 = $item.SourceHash
+                    }
                 }
             }
-            "modified" {
-                $blockedCount++
-                Write-Warning "Refusing to overwrite locally modified file: $($item.Target)"
+
+            switch ($item.Status) {
+                "synced" {
+                    $syncedCount++
+                }
+                "missing" {
+                    $missingCount++
+                    if (-not $DryRun) {
+                        $targetDir = [System.IO.Path]::GetDirectoryName($item.TargetPath)
+                        if (-not (Test-Path -Path $targetDir)) {
+                            New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+                        }
+                        Copy-Item -Path $item.SourcePath -Destination $item.TargetPath
+                        $materializedCount++
+                    }
+                }
+                "update_available" {
+                    if (-not $DryRun) {
+                        Copy-Item -Path $item.SourcePath -Destination $item.TargetPath
+                        $materializedCount++
+                    }
+                }
+                "modified" {
+                    $blockedCount++
+                    Write-Warning "Refusing to overwrite locally modified file: $($item.Target)"
+                }
+                "conflict" {
+                    $blockedCount++
+                    Write-Error "Conflict detected in $($item.Target). Both source and target differ from lock."
+                }
+                "unresolved" {
+                    $blockedCount++
+                    Write-Error "Cannot resolve component: $($item.Component)"
+                }
             }
-            "conflict" {
-                $blockedCount++
-                Write-Error "Conflict detected in $($item.Target). Both source and target differ from lock."
+        }
+
+        if (-not $DryRun -and $blockedCount -eq 0) {
+            $newLock = [PSCustomObject]@{
+                lockfileVersion = "1.0.0"
+                generatedAt     = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+                profile         = "$($manifest.profile)@1.0.0"
+                skills          = $newLockSkills
+                hooks           = $newLockHooks
             }
-            "unresolved" {
-                $blockedCount++
-                Write-Error "Cannot resolve component: $($item.Component)"
-            }
+            Save-DevKitLock -ProjectDir $ProjectDir -LockObject $newLock
         }
     }
-
-    if (-not $DryRun -and $blockedCount -eq 0) {
-        $newLock = [PSCustomObject]@{
-            lockfileVersion = "1.0.0"
-            generatedAt     = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
-            profile         = "$($manifest.profile)@1.0.0"
-            skills          = $newLockSkills
-            hooks           = $newLockHooks
+    finally {
+        # Always clean up any temporary directories used during fetch
+        $cleanedBases = @{}
+        foreach ($item in $state) {
+            if ($item.TempBase -and (-not $cleanedBases.ContainsKey($item.TempBase))) {
+                $cleanedBases[$item.TempBase] = $true
+                if (Test-Path $item.TempBase) {
+                    Remove-Item -Path $item.TempBase -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
         }
-        Save-DevKitLock -ProjectDir $ProjectDir -LockObject $newLock
     }
 
     return [PSCustomObject]@{
@@ -601,6 +970,10 @@ Export-ModuleMember -Function `
     Get-DevKitSha256, `
     Resolve-DevKitComponent, `
     Resolve-DevKitHook, `
+    Get-DevKitThirdPartyRegistry, `
+    Resolve-DevKitThirdParty, `
+    Test-DevKitPackageSecurity, `
+    Fetch-DevKitThirdParty, `
     Get-DevKitManifest, `
     Get-DevKitLock, `
     Save-DevKitLock, `

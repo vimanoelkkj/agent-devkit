@@ -10,7 +10,5 @@
   "hooks": [
     "guard-d1-remote.mjs"
   ],
-  "thirdPartySkills": [
-    "graphify"
-  ]
+  "thirdPartySkills": []
 }

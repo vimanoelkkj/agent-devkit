@@ -1,17 +1,20 @@
 {
   "version": "1.0.0",
   "registry": {
-    "graphify": {
-      "description": "Knowledge graph extraction and navigation for coding agents",
+    "caveman": {
+      "description": "Token-efficient communication skill for coding agents",
       "type": "github",
       "repo": "JuliusBrussee/caveman",
-      "ref": "a8f3b20c4e1234567890abcdef1234567890abcd",
-      "subpath": "skills/graphify",
-      "license": "MIT",
+      "ref": "f5d729488caa8f6a5b6c8086fe2cccd3e8a63f91",
+      "subpath": "skills/caveman",
+      "license": "Apache-2.0",
       "policy": "data-only",
-      "allowedFiles": [
-        "*.md",
-        ".graphify_version"
+      "allowedExtensions": [
+        ".md",
+        ".txt",
+        ".json",
+        ".yaml",
+        ".yml"
       ],
       "disallowedExtensions": [
         ".exe",
@@ -19,7 +22,14 @@
         ".cmd",
         ".ps1",
         ".sh",
-        ".dll"
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".py",
+        ".rb"
       ]
     }
   }
