@@ -302,6 +302,129 @@ function Get-DevKitProfile {
     return $content | ConvertFrom-Json
 }
 
+function Find-DevKitProject {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileName,
+        [Parameter(Mandatory = $true)]
+        [string]$DevKitRoot,
+        [string]$HomeDir = $HOME,
+        [string[]]$SearchRoots
+    )
+
+    $profile = Get-DevKitProfile -ProfileName $ProfileName -DevKitRoot $DevKitRoot
+    $discovery = $profile.discovery
+    if ($null -eq $discovery -or [string]::IsNullOrWhiteSpace($discovery.githubRepository)) {
+        throw "Profile '$ProfileName' has no discovery.githubRepository. Use -ProjectDir or configure discovery."
+    }
+
+    $expected = [string]$discovery.githubRepository
+    if ($expected -notmatch '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$') {
+        throw "Invalid discovery.githubRepository for profile '$ProfileName'."
+    }
+
+    $roots = [System.Collections.Generic.List[string]]::new()
+    if ($PSBoundParameters.ContainsKey("SearchRoots")) {
+        foreach ($root in $SearchRoots) {
+            if ([string]::IsNullOrWhiteSpace($root)) {
+                throw "SearchRoots cannot contain empty paths."
+            }
+            $roots.Add($root)
+        }
+        if ($roots.Count -eq 0) { throw "SearchRoots cannot be empty." }
+    }
+    else {
+        if ([string]::IsNullOrWhiteSpace($HomeDir)) {
+            throw "HOME is unavailable; pass -SearchRoots."
+        }
+        foreach ($relative in @($discovery.homeDirectories)) {
+            if ([string]::IsNullOrWhiteSpace($relative) -or
+                [System.IO.Path]::IsPathRooted($relative) -or
+                $relative -match '[\\/]' -or
+                $relative -in @(".", "..")) {
+                throw "Invalid homeDirectories entry in profile '$ProfileName'."
+            }
+            $roots.Add((Join-Path $HomeDir $relative))
+        }
+        if ($roots.Count -eq 0) {
+            throw "Profile '$ProfileName' has no discovery.homeDirectories; pass -SearchRoots."
+        }
+    }
+
+    if ($null -eq (Get-Command git -ErrorAction SilentlyContinue)) {
+        throw "Git is required for -AutoDiscover. No project was modified."
+    }
+
+    $found = [System.Collections.Generic.List[string]]::new()
+    $visited = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($searchRoot in $roots) {
+        if (-not (Test-Path -LiteralPath $searchRoot -PathType Container)) { continue }
+        $rootDir = (Resolve-Path -LiteralPath $searchRoot).Path
+        $candidates = [System.Collections.Generic.List[string]]::new()
+        $candidates.Add($rootDir)
+
+        # Bounded search: root itself and its immediate child folders only.
+        foreach ($child in @(Get-ChildItem -LiteralPath $rootDir -Directory -ErrorAction Stop)) {
+            if (($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            $candidates.Add($child.FullName)
+        }
+
+        foreach ($candidate in $candidates) {
+            $path = [System.IO.Path]::GetFullPath($candidate).TrimEnd('\', '/')
+            if (-not $visited.Add($path)) { continue }
+            if (-not (Test-Path -LiteralPath (Join-Path $path ".git"))) { continue }
+
+            $markersPresent = $true
+            foreach ($marker in @($discovery.markers)) {
+                if ([string]::IsNullOrWhiteSpace($marker) -or
+                    [System.IO.Path]::IsPathRooted($marker) -or
+                    $marker -match '[\\/]' -or $marker -in @(".", "..")) {
+                    throw "Invalid discovery.markers entry in profile '$ProfileName'."
+                }
+                if (-not (Test-Path -LiteralPath (Join-Path $path $marker) -PathType Leaf)) {
+                    $markersPresent = $false
+                    break
+                }
+            }
+            if (-not $markersPresent) { continue }
+
+            try {
+                $topLevel = & git -C $path rev-parse --show-toplevel 2>$null
+                if ($LASTEXITCODE -ne 0 -or -not $topLevel) { continue }
+                $repoRoot = [System.IO.Path]::GetFullPath([string](@($topLevel)[0])).TrimEnd('\', '/')
+                if (-not [string]::Equals($repoRoot, $path, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+
+                # Only read local Git configuration; do not run Git hooks or call any network.
+                $origin = & git -C $path config --get remote.origin.url 2>$null
+                if ($LASTEXITCODE -ne 0 -or -not $origin) { continue }
+                $remote = ([string](@($origin)[0])).Trim()
+                if ($remote -notmatch '^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)/?$') {
+                    continue
+                }
+                $repoName = $Matches[1] -replace '\.git$', ''
+                if ([string]::Equals($repoName, $expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $found.Add($path)
+                }
+            }
+            catch {
+                # Never trust an inaccessible or malformed Git directory as a target.
+                continue
+            }
+        }
+    }
+
+    if ($found.Count -eq 0) {
+        throw "No matching Git checkout of '$expected' found for profile '$ProfileName'. Check HOME search directories or use -SearchRoots / -ProjectDir. No files changed."
+    }
+    if ($found.Count -gt 1) {
+        throw "Ambiguous project discovery for '$expected': $($found -join '; '). Choose one with -ProjectDir. No files changed."
+    }
+
+    return $found[0]
+}
+
 function Get-DevKitProfileList {
     [CmdletBinding()]
     param(
@@ -2186,6 +2309,7 @@ Export-ModuleMember -Function `
     Invoke-DevKitVerify, `
     Get-DevKitSkillCatalog, `
     Get-DevKitSkillInfo, `
+    Find-DevKitProject, `
     Get-DevKitProfileList, `
     Get-DevKitProfile, `
     Add-DevKitProfileSkill, `

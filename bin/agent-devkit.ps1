@@ -30,7 +30,13 @@ param(
     [switch]$DryRun,
 
     [Parameter(Mandatory = $false)]
-    [switch]$NoGitExclude
+    [switch]$NoGitExclude,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AutoDiscover,
+
+    [Parameter(Mandatory = $false)]
+    [string[]]$SearchRoots
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,7 +47,32 @@ $devKitRoot = Split-Path -Parent $scriptDir
 $modulePath = Join-Path $devKitRoot "src\DevKit.Engine.psm1"
 Import-Module $modulePath -Force -DisableNameChecking
 
-$ProjectDir = (Resolve-Path $ProjectDir).Path
+if ($AutoDiscover) {
+    if ($Command -notin @("sync", "verify")) {
+        throw "-AutoDiscover is supported only for sync and verify."
+    }
+    if ($PSBoundParameters.ContainsKey("ProjectDir")) {
+        throw "Use either -AutoDiscover or -ProjectDir, not both."
+    }
+    if ([string]::IsNullOrWhiteSpace($Profile)) {
+        throw "-AutoDiscover requires -Profile to select an expected Git repository."
+    }
+    $discoveryArgs = @{
+        ProfileName = $Profile
+        DevKitRoot  = $devKitRoot
+    }
+    if ($PSBoundParameters.ContainsKey("SearchRoots")) {
+        $discoveryArgs.SearchRoots = $SearchRoots
+    }
+    $ProjectDir = Find-DevKitProject @discoveryArgs
+    Write-Host "Auto-discovered project: $ProjectDir" -ForegroundColor Green
+}
+else {
+    if ($PSBoundParameters.ContainsKey("SearchRoots")) {
+        throw "-SearchRoots requires -AutoDiscover."
+    }
+    $ProjectDir = (Resolve-Path $ProjectDir).Path
+}
 
 $explicitManifest = $null
 if (-not [string]::IsNullOrWhiteSpace($ManifestFile)) {
