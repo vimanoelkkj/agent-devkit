@@ -758,7 +758,17 @@ try {
     # 15.5 Integration with Invoke-DevKitSync
     # Materialize rp-doces profile into gitSandbox
     $syncGit = Invoke-DevKitSync -ProjectDir $gitSandbox -Profile "rp-doces" -StateDir $gitStateDir -DevKitRoot $devKitRoot
-    Assert-Equal $syncGit.Materialized 42 "Sync materialized 42 files into git consumer"
+    Assert-Equal $syncGit.Materialized $syncGit.TotalFiles "Sync materialized all expected profile files into git consumer"
+    Assert-Equal $syncGit.Blocked 0 "No files blocked during clean git consumer sync"
+
+    # Third-party frontend-design contains SKILL.md and LICENSE.txt in both agent targets.
+    # Check the actual artifacts rather than baking a profile-wide file count into this test.
+    foreach ($target in @(".agents\skills", ".claude\skills")) {
+        foreach ($file in @("SKILL.md", "LICENSE.txt")) {
+            $skillFile = Join-Path $gitSandbox (Join-Path $target (Join-Path "frontend-design" $file))
+            Assert-True (Test-Path $skillFile -PathType Leaf) "frontend-design $file materialized in $target"
+        }
+    }
 
     # Verify that exclude file has the block intact
     $postSyncExclude = Get-Content -Path $excludeFile -Raw
