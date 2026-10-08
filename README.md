@@ -178,6 +178,29 @@ Lockfile update (agent-devkit.lock with full 40-char SHA & file digests)
 Sandbox cleanup (guaranteed in finally block)
 ```
 
+### Frontend design (R&P Doces)
+
+`frontend-design` comes from `anthropics/skills` as an immutable, data-only
+third-party dependency (Apache-2.0). The `rp-doces` profile opts in.
+
+After pulling Agent DevKit, run these commands in its repository:
+
+```powershell
+.\bin\agent-devkit.ps1 skill info frontend-design
+.\bin\agent-devkit.ps1 profile show rp-doces
+.\bin\agent-devkit.ps1 sync -Profile rp-doces -ProjectDir "C:\path\to\rp-doces" -DryRun
+.\bin\agent-devkit.ps1 sync -Profile rp-doces -ProjectDir "C:\path\to\rp-doces"
+.\bin\agent-devkit.ps1 verify -Profile rp-doces -ProjectDir "C:\path\to\rp-doces"
+```
+
+When a consumer has its own `agent-devkit.json`, also declare
+`frontend-design` in `thirdPartySkills`; explicit manifests override profile
+composition. The engine refuses to overwrite locally changed files.
+
+For R&P Doces, preserve existing Fraunces/Manrope type, CSS theme tokens,
+layouts and functionality. Use visual comparison and an approval-first
+approach before implementing small refinements.
+
 ### Verified Integrations
 
 - **`caveman`**: Verified integration against `JuliusBrussee/caveman` at commit `f5d729488caa8f6a5b6c8086fe2cccd3e8a63f91`, subpath `skills/caveman`.

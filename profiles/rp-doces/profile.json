@@ -11,7 +11,9 @@
     "targeted-repo-search",
     "targeted-validation"
   ],
-  "thirdPartySkills": [],
+  "thirdPartySkills": [
+    "frontend-design"
+  ],
   "hooks": [
     "guard-applied-migrations.mjs",
     "guard-d1-remote.mjs",

@@ -31,6 +31,37 @@
         ".py",
         ".rb"
       ]
+    },
+    "frontend-design": {
+      "description": "Official Anthropic frontend design guidance",
+      "type": "github",
+      "repo": "anthropics/skills",
+      "ref": "683bc88e56f3e09ba94f7055977f3d3aa499f202",
+      "subpath": "skills/frontend-design",
+      "license": "Apache-2.0",
+      "policy": "data-only",
+      "allowedExtensions": [
+        ".md",
+        ".txt",
+        ".json",
+        ".yaml",
+        ".yml"
+      ],
+      "disallowedExtensions": [
+        ".exe",
+        ".bat",
+        ".cmd",
+        ".ps1",
+        ".sh",
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".py",
+        ".rb"
+      ]
     }
   }
 }
