@@ -112,6 +112,35 @@ Manage project profiles declaratively:
 .\bin\agent-devkit.ps1 profile remove rp-doces caveman
 ```
 
+### Automatically discover a consumer checkout
+
+The `rp-doces` profile declares the expected GitHub repository and safe,
+bounded search roots relative to the **current user's** home directory:
+`$HOME/dev` and `$HOME/Projetos`. Discovery inspects only each root and its
+immediate children, verifies the exact Git origin plus the `package.json`
+marker, and refuses to guess if multiple checkouts match. Nothing is written
+until normal `sync` is executed. `verify` remains read-only.
+
+```powershell
+# From the local agent-devkit directory, at work or at home:
+.\bin\agent-devkit.ps1 sync -Profile rp-doces -AutoDiscover -DryRun
+.\bin\agent-devkit.ps1 sync -Profile rp-doces -AutoDiscover
+.\bin\agent-devkit.ps1 verify -Profile rp-doces -AutoDiscover
+```
+
+To search another directory, use `-SearchRoots` explicitly (one-level scan).
+
+```powershell
+.\bin\agent-devkit.ps1 sync -Profile rp-doces -AutoDiscover -SearchRoots 'D:\code' -DryRun
+```
+
+Use `-ProjectDir` instead if multiple checkouts match. `-AutoDiscover` cannot
+be combined with `-ProjectDir`, and requires `-Profile`. It never searches
+all drives, relies on the folder name, calls GitHub's network, or modifies a
+repository merely to find it. HTTPS, SCP-style SSH and `ssh://git@github.com/`
+origin URLs are accepted. Other profiles must declare their own
+`discovery.githubRepository` and search roots to opt in.
+
 ### 3. Overview of Available Components (Legacy)
 
 Inspect a high-level overview of core skills/hooks, profiles, and third-party registry:

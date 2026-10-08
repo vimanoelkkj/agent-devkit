@@ -52,5 +52,15 @@
   "configs": [
     "settings.json"
   ],
-  "overlays": []
+  "overlays": [],
+  "discovery": {
+    "githubRepository": "vimanoelkkj/rp-doces-admin",
+    "homeDirectories": [
+      "dev",
+      "Projetos"
+    ],
+    "markers": [
+      "package.json"
+    ]
+  }
 }

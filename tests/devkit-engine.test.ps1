@@ -801,6 +801,80 @@ finally {
     Remove-Item -Path $gitStateDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# Test 16: Auto-discover local checkouts without hardcoded usernames.
+Write-Host ""
+Write-Host "Test 16: Bounded Git project auto-discovery" -ForegroundColor Yellow
+$discoverHome = Join-Path ([System.IO.Path]::GetTempPath()) "devkit-discovery-$([Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $discoverHome -Force | Out-Null
+try {
+    $workProject = Join-Path $discoverHome "dev\rp-doces-admin"
+    $homeProject = Join-Path $discoverHome "Projetos\rp-doces"
+    New-Item -ItemType Directory -Path $workProject -Force | Out-Null
+    Set-Content (Join-Path $workProject "package.json") -Value "{}"
+
+    Assert-Throws {
+        Find-DevKitProject -ProfileName "rp-doces" -DevKitRoot $devKitRoot -HomeDir $discoverHome
+    } "No matching Git checkout" "Rejects a plain directory without Git"
+
+    & git -C $workProject init -q
+    & git -C $workProject remote add origin "https://github.com/vimanoelkkj/unrelated.git"
+    Assert-Throws {
+        Find-DevKitProject -ProfileName "rp-doces" -DevKitRoot $devKitRoot -HomeDir $discoverHome
+    } "No matching Git checkout" "Rejects an unrelated remote"
+
+    & git -C $workProject remote set-url origin "https://github.com/vimanoelkkj/rp-doces-admin.git"
+    Assert-Equal (Find-DevKitProject -ProfileName "rp-doces" -DevKitRoot $devKitRoot -HomeDir $discoverHome) $workProject "Finds repo under HOME/dev on work computer"
+    & git -C $workProject remote set-url origin "git@github.com:vimanoelkkj/rp-doces-admin.git"
+    Assert-Equal (Find-DevKitProject -ProfileName "rp-doces" -DevKitRoot $devKitRoot -HomeDir $discoverHome) $workProject "Accepts SCP-style SSH origin"
+    & git -C $workProject remote set-url origin "ssh://git@github.com/vimanoelkkj/rp-doces-admin"
+    Assert-Equal (Find-DevKitProject -ProfileName "rp-doces" -DevKitRoot $devKitRoot -HomeDir $discoverHome) $workProject "Accepts ssh:// origin"
+
+    & git -C $workProject remote set-url origin "https://github.com/vimanoelkkj/unrelated"
+    New-Item -ItemType Directory -Path $homeProject -Force | Out-Null
+    Set-Content (Join-Path $homeProject "package.json") -Value "{}"
+    & git -C $homeProject init -q
+    & git -C $homeProject remote add origin "git@github.com:vimanoelkkj/rp-doces-admin.git"
+    Assert-Equal (Find-DevKitProject -ProfileName "rp-doces" -DevKitRoot $devKitRoot -HomeDir $discoverHome) $homeProject "Finds repo under HOME/Projetos on home computer"
+
+    Remove-Item (Join-Path $homeProject "package.json")
+    Assert-Throws {
+        Find-DevKitProject -ProfileName "rp-doces" -DevKitRoot $devKitRoot -HomeDir $discoverHome
+    } "No matching Git checkout" "Requires marker package.json"
+    Set-Content (Join-Path $homeProject "package.json") -Value "{}"
+
+    & git -C $workProject remote set-url origin "https://github.com/vimanoelkkj/rp-doces-admin"
+    Assert-Throws {
+        Find-DevKitProject -ProfileName "rp-doces" -DevKitRoot $devKitRoot -HomeDir $discoverHome
+    } "Ambiguous project discovery" "Rejects two matching checkouts"
+
+    $customProject = Join-Path $discoverHome "custom-root\unexpected-name"
+    New-Item -ItemType Directory -Path $customProject -Force | Out-Null
+    Set-Content (Join-Path $customProject "package.json") -Value "{}"
+    & git -C $customProject init -q
+    & git -C $customProject remote add origin "https://github.com/vimanoelkkj/rp-doces-admin.git"
+    $customRoot = Join-Path $discoverHome "custom-root"
+    Assert-Equal (Find-DevKitProject -ProfileName "rp-doces" -DevKitRoot $devKitRoot -HomeDir $discoverHome -SearchRoots @($customRoot)) $customProject "Custom SearchRoots ignores folder naming"
+    Assert-Equal (Find-DevKitProject -ProfileName "rp-doces" -DevKitRoot $devKitRoot -HomeDir $discoverHome -SearchRoots @($customProject)) $customProject "Can search an exact checkout folder"
+
+    $deepProject = Join-Path $discoverHome "nested-root\first\second"
+    New-Item -ItemType Directory -Path $deepProject -Force | Out-Null
+    Set-Content (Join-Path $deepProject "package.json") -Value "{}"
+    & git -C $deepProject init -q
+    & git -C $deepProject remote add origin "https://github.com/vimanoelkkj/rp-doces-admin"
+    Assert-Throws {
+        Find-DevKitProject -ProfileName "rp-doces" -DevKitRoot $devKitRoot -HomeDir $discoverHome -SearchRoots @((Join-Path $discoverHome "nested-root"))
+    } "No matching Git checkout" "Stops after one level of directories"
+    Assert-Throws {
+        Find-DevKitProject -ProfileName "rp-doces" -DevKitRoot $devKitRoot -HomeDir $discoverHome -SearchRoots @("")
+    } "empty paths" "Rejects empty search root"
+    Assert-True (-not (Test-Path (Join-Path $customProject "agent-devkit.lock"))) "Discovery never writes lockfile"
+    Assert-True (-not (Test-Path (Join-Path $customProject ".agents"))) "Discovery never writes .agents"
+    Assert-True (-not (Test-Path (Join-Path $customProject ".claude"))) "Discovery never writes .claude"
+}
+finally {
+    Remove-Item -Path $discoverHome -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 Write-Host "`n=== TEST SUMMARY ===" -ForegroundColor Cyan
 Write-Host "Passed: $passCount" -ForegroundColor Green
 Write-Host "Failed: $failCount" -ForegroundColor $(if ($failCount -gt 0) { "Red" } else { "DarkGray" })
