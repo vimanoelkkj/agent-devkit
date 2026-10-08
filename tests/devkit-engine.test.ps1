@@ -198,6 +198,17 @@ Assert-Equal $tpEntry.subpath "skills/caveman" "Subpath is skills/caveman"
 Assert-Equal $tpEntry.policy "data-only" "Policy is data-only"
 Assert-Equal $tpEntry.license "Apache-2.0" "License is Apache-2.0"
 
+# Official frontend-design skill is registered without duplicating its source.
+$frontendDesign = Resolve-DevKitThirdParty -ComponentName "frontend-design" -DevKitRoot $devKitRoot
+Assert-True ($null -ne $frontendDesign) "Resolves frontend-design from third-party registry"
+Assert-Equal $frontendDesign.repo "anthropics/skills" "References Anthropic official skills repository"
+Assert-Equal $frontendDesign.ref "683bc88e56f3e09ba94f7055977f3d3aa499f202" "Pins frontend-design to reviewed commit"
+Assert-Equal $frontendDesign.subpath "skills/frontend-design" "Uses official frontend-design subpath"
+Assert-Equal $frontendDesign.policy "data-only" "Uses data-only third-party policy"
+Assert-Equal $frontendDesign.license "Apache-2.0" "Preserves upstream license metadata"
+$rpProfile = Get-DevKitProfile -ProfileName "rp-doces" -DevKitRoot $devKitRoot
+Assert-True ($rpProfile.thirdPartySkills -contains "frontend-design") "Profile rp-doces enables frontend-design"
+
 $nullEntry = Resolve-DevKitThirdParty -ComponentName "non-existent-tp" -DevKitRoot $devKitRoot
 Assert-True ($null -eq $nullEntry) "Non-existent third-party component resolves to null"
 
