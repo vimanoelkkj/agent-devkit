@@ -21,7 +21,7 @@ try {
       seen.add(flag);
       if (flag === '--dry-run' && command === 'sync') options.dryRun = true;
       else {
-        const keys = { '--project-dir': 'projectDir', '--profile': 'profile', '--manifest-file': 'manifestFile' };
+        const keys = { '--project-dir': 'projectDir', '--profile': 'profile', '--manifest-file': 'manifestFile', '--state-scope': 'stateScope' };
         const key = Object.hasOwn(keys, flag) ? keys[flag] : undefined;
         if (!key) throw new Error(`Unsupported option: ${flag}`);
         const value = args.shift();

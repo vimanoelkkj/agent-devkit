@@ -101,6 +101,34 @@ function originRepository(projectDir) {
   if (!match) fail('Origin must be an exact GitHub HTTPS or SSH repository URL');
   return match[1].toLowerCase();
 }
+// Checkout state is opt-in. Binding metadata travels with the 1.0.0 lock so
+// copying a foreign lock into a namespace fails closed instead of adopting it.
+function checkoutIdentity(projectDir) {
+  const dotGit = path.join(projectDir, '.git');
+  safe(dotGit, stat(dotGit)?.isDirectory() ? 'directory' : 'file');
+  if (!stat(dotGit)) fail('Checkout state requires a Git checkout root');
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
+  env.GIT_CONFIG_NOSYSTEM = '1';
+  env.GIT_CONFIG_GLOBAL = '/dev/null';
+  const values = execFileSync('git', ['-C', projectDir, '-c', 'core.hooksPath=/dev/null',
+    'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir', '--git-common-dir'],
+    { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] }).trimEnd().split('\n');
+  if (values.length !== 3) fail('Invalid Git checkout identity');
+  const [top, gitDir, commonDir] = values.map(value => fs.realpathSync(safe(value, 'directory')));
+  if (top !== projectDir) fail('Project directory must be the Git checkout root');
+  for (const dir of new Set([gitDir, commonDir])) {
+    for (const file of ['config', 'config.worktree', 'commondir', 'gitdir']) safe(path.join(dir, file));
+  }
+  const machine = read('/etc/machine-id')?.toString('utf8').trim();
+  if (!machine || !/^[a-f0-9]{32}$/i.test(machine)) fail('A valid Linux machine-id is required for checkout state');
+  const stamp = dir => {
+    const s = fs.statSync(dir, { bigint: true });
+    return { device: String(s.dev), inode: String(s.ino) };
+  };
+  const identity = { version: 1, machine: hash(machine), projectDir: top, gitDir, commonDir,
+    project: stamp(top), git: stamp(gitDir), origin: originRepository(projectDir) };
+  return { identity, id: hash(json(identity)) };
+}
 function walk(root, prefix = '') {
   safe(root, 'directory');
   if (!stat(root)) return [];
@@ -115,10 +143,16 @@ function walk(root, prefix = '') {
   });
 }
 
-export function plan({ devkitRoot, projectDir, profile: selectedProfile, manifestFile }) {
+export function plan({ devkitRoot, projectDir, profile: selectedProfile, manifestFile, stateScope }) {
   devkitRoot = safe(devkitRoot, 'directory');
   projectDir = safe(projectDir, 'directory');
   if (!stat(projectDir)?.isDirectory()) fail('Project directory does not exist');
+  if (stateScope !== undefined && stateScope !== 'checkout') fail('Unsupported state scope');
+  if (stateScope && (!selectedProfile || manifestFile)) fail('Checkout state requires --profile and forbids --manifest-file');
+  const checkout = stateScope ? checkoutIdentity(projectDir) : null;
+  if (checkout && (stat(inside(projectDir, 'agent-devkit.json')) || stat(inside(projectDir, 'agent-devkit.lock')))) {
+    fail('Checkout state forbids consumer manifest and lock; migrate them explicitly first');
+  }
   const manifestPath = inside(projectDir, 'agent-devkit.json');
   const localManifest = readJson(manifestPath);
   // Explicit manifest > explicit profile > project manifest, matching the engine.
@@ -134,6 +168,7 @@ export function plan({ devkitRoot, projectDir, profile: selectedProfile, manifes
       if (!stat(inside(projectDir, marker))) fail(`Missing project marker: ${marker}`);
     }
   }
+  if (checkout && !profile.discovery?.githubRepository) fail('Checkout state requires an exclusive profile Git origin');
   supported(manifest);
   const requested = [...new Set([...array(manifest, 'skills'),
     ...['core', 'profile', 'skills'].flatMap(k => array(manifest.components ?? {}, k))])];
@@ -171,10 +206,15 @@ export function plan({ devkitRoot, projectDir, profile: selectedProfile, manifes
     if (resources.hooks.length) inside(projectDir, target, 'directory');
   }
   // External state is the existing contract, bounded to this DevKit's state/<profile>.
-  const lockPath = localManifest ? inside(projectDir, 'agent-devkit.lock') :
+  const binding = checkout ? { ...checkout.identity, profile: profileName } : null;
+  const lockPath = checkout ? inside(devkitRoot, `state/${profileName}/checkouts/${checkout.id}/agent-devkit.lock`) :
+    localManifest ? inside(projectDir, 'agent-devkit.lock') :
     inside(devkitRoot, `state/${profileName}/agent-devkit.lock`);
   const oldLockBytes = read(lockPath);
   const lock = readJson(lockPath);
+  if (lock && (checkout ? !isDeepStrictEqual(lock.checkoutState, binding) : own(lock, 'checkoutState'))) {
+    fail('Checkout state binding mismatch (foreign, missing or incompatible ownership)');
+  }
   if (lock) {
     if (lock.lockfileVersion !== '1.0.0' || lock.profile !== `${profileName}@1.0.0` || !object(lock.skills)) fail('Incompatible lockfile');
     for (const key of sections) {
@@ -270,7 +310,7 @@ export function plan({ devkitRoot, projectDir, profile: selectedProfile, manifes
     }
   }
   const newLock = { ...lock, lockfileVersion: '1.0.0', generatedAt: lock?.generatedAt ?? new Date().toISOString(),
-    profile: `${profileName}@1.0.0`, skills, ...Object.fromEntries(sections.map(k => [k, {}])), ...resourceLocks };
+    ...(binding ? { checkoutState: binding } : {}), profile: `${profileName}@1.0.0`, skills, ...Object.fromEntries(sections.map(k => [k, {}])), ...resourceLocks };
   // Retain compatible metadata/provenance; fail above for unsupported resource types.
   if (lock) {
     for (const [skill, entry] of Object.entries(skills)) newLock.skills[skill] = { ...lock.skills[skill], ...entry };
@@ -279,7 +319,7 @@ export function plan({ devkitRoot, projectDir, profile: selectedProfile, manifes
   const normalizedLock = lock && { ...lock, ...Object.fromEntries(sections.map(k => [k, lock[k] ?? {}])) };
   if (lock && isDeepStrictEqual(JSON.parse(JSON.stringify(newLock)), normalizedLock)) lockBytes = oldLockBytes;
   else if (lock) { newLock.generatedAt = new Date().toISOString(); lockBytes = json(newLock); }
-  return { projectDir, devkitRoot, lockPath, oldLockBytes, lockBytes, state };
+  return { projectDir, devkitRoot, lockPath, oldLockBytes, lockBytes, state, checkout };
 }
 
 function equal(a, b) { return a === null ? b === null : b !== null && a.equals(b); }
@@ -295,7 +335,9 @@ export function sync(options, { beforeWrite = () => {} } = {}) {
   const changes = writes.map(s => ({ file: s.targetPath, bytes: s.bytes, before: s.before }));
   if (!equal(p.oldLockBytes, p.lockBytes)) changes.push({ file: p.lockPath, bytes: p.lockBytes, before: p.oldLockBytes });
   if (!changes.length) return { ...p, blocked: false, written: 0 };
-  const guard = inside(p.projectDir, '.agent-devkit-sync');
+  const guard = p.checkout ? inside(p.devkitRoot, `.agent-devkit-checkout-${p.checkout.id}.sync`) :
+    inside(p.projectDir, '.agent-devkit-sync');
+  if (p.checkout && stat(inside(p.projectDir, '.agent-devkit-sync'))) fail('Legacy sync guard exists for this checkout');
   let guardFd;
   const createdDirs = [];
   const committed = [];
@@ -320,12 +362,14 @@ export function sync(options, { beforeWrite = () => {} } = {}) {
   }
   try {
     guardFd = fs.openSync(guard, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600);
+    if (p.checkout && !isDeepStrictEqual(checkoutIdentity(p.projectDir), p.checkout)) fail('Checkout identity changed during sync');
     // Refuse a stale plan if any evaluated target or the lock changed.
     for (const s of p.state) if (!equal(read(s.targetPath), s.before)) fail(`Target changed during sync: ${s.target}`);
     if (!equal(read(p.lockPath), p.oldLockBytes)) fail('Lock changed during sync');
     for (const [index, change] of changes.entries()) {
       mkdir(path.dirname(change.file));
       beforeWrite(index, change.file);
+      if (p.checkout && !isDeepStrictEqual(checkoutIdentity(p.projectDir), p.checkout)) fail('Checkout identity changed during sync');
       if (!equal(read(change.file), change.before)) fail(`Target changed during sync: ${change.file}`);
       const mode = stat(change.file)?.mode & 0o777;
       replace(change.file, change.bytes, change.before === null ? 0o644 : mode);

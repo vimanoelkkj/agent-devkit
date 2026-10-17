@@ -134,14 +134,76 @@ is refused. Manifests are never created or rewritten.
 
 Lock placement and schema follow the existing engine: if the project has
 `agent-devkit.json`, use its `agent-devkit.lock`; otherwise use
-`state/<profile>/agent-devkit.lock` in this DevKit. The latter is the sole
-managed-state write outside the consumer project; Skills destinations cannot
+`state/<profile>/agent-devkit.lock` in this DevKit. This is the legacy state selection; Skills destinations cannot
 escape the project. Locks retain `lockfileVersion: "1.0.0"`,
 `profile: "<name>@1.0.0"`, `generatedAt`, component maps, local provenance
 (`core` or `profile:<name>`), Skill version and per-file lowercase SHA-256.
 An unchanged sync preserves the lock bytes and timestamps. State is shared
 per profile as in PowerShell; use one checkout per profile with external
-state, or project manifests for separate checkout locks.
+state, project manifests for separate checkout locks, or the explicit Node
+checkout scope described below.
+
+### Explicit checkout state (Linux / Node.js 24)
+
+Use `--state-scope checkout` with `--profile` to keep each checkout's mutable
+baseline separate, without a consumer manifest or lockfile. This is opt-in;
+existing profiles and the PowerShell CLI retain their previous behavior.
+
+```bash
+# Example for a checkout already prepared for central operation:
+node bin/agent-devkit.mjs sync --profile chopp-delivery \
+  --project-dir /absolute/path/to/checkout --state-scope checkout --dry-run
+node bin/agent-devkit.mjs verify --profile chopp-delivery \
+  --project-dir /absolute/path/to/checkout --state-scope checkout
+# After reviewing the preview, remove --dry-run from the sync command to apply.
+```
+
+This scope requires an explicit profile with `discovery.githubRepository`
+matching the checkout's GitHub origin. `--manifest-file` and consumer-side
+`agent-devkit.json` / `agent-devkit.lock` are refused, including ignored files.
+No migration, deletion, profile edit or legacy-lock import happens implicitly.
+Targets come exclusively from the central profile. The shipped Chopp profile
+still selects `.agents/skills` only; declaring both permitted targets in a
+profile is a separate reviewed change. No versioned product metadata is needed.
+
+The full SHA-256 namespace identifies the canonical checkout root, its device
+and inode, Git directory and common directory, normalized GitHub origin, and
+a hash of Linux `/etc/machine-id`. Distinct clones and linked Git worktrees
+have independent namespaces, even with identical folder names. Symlinks,
+hardlinks to metadata files, non-root project paths and unsafe paths fail.
+A valid machine-id and a local Git checkout are required; changing machine-id,
+relocating/recreating a checkout or changing its filesystem identity requires
+an explicit migration review. Copied machines must have unique machine-ids;
+bit-for-bit machine/filesystem clones are outside this identity guarantee.
+
+Locks live at
+`state/<profile>/checkouts/<64-hex-checkout-id>/agent-devkit.lock` under this
+DevKit. They retain `lockfileVersion: "1.0.0"`, component hashes and provenance.
+Only this scope adds `checkoutState` ownership metadata. Every read compares
+that metadata exactly against the current checkout and profile; foreign,
+missing, extra or incompatible ownership fails closed. Copying a lock from
+another checkout into the expected namespace cannot adopt its baseline.
+Legacy Node selection refuses a bound lock instead of silently using it.
+
+Writes use an exclusive `.agent-devkit-checkout-<id>.sync` guard in the DevKit
+root, shared across profiles targeting that checkout in this DevKit. The guard
+is removed on handled completion/failure; review residual guards manually.
+An existing consumer `.agent-devkit-sync` guard blocks scoped writes as well.
+Do not mix legacy/scoped writers or different DevKit installations against
+one checkout concurrently: their guard namespaces differ. Identity/origin is
+rechecked after acquiring the guard and before each write. Locks commit last;
+recoverable failures use the same bounded rollback as legacy sync. Dry-run
+and verify create no state directories, locks or guards. Identical existing
+Skill bytes need no rewrite; no-op sync preserves inodes, modes and mtimes.
+Rollback after actual replacement restores bytes/modes, not original inodes
+or mtimes. Crash recovery remains manual.
+
+The new scope is Node-only. PowerShell's legacy manifest/lock selection and
+schema are unchanged; do not point PowerShell `-StateDir` at scoped state:
+it does not validate checkout ownership. Existing bidirectional interoperability
+tests cover unbound legacy locks. The additional checkout tests confirm that
+PowerShell's default selection does not select or modify scoped locks.
+No hooks are registered or executed by this feature.
 
 All requested files are validated before writes. Local modifications,
 conflicts and untracked files in selected Skills targets block the entire
@@ -171,6 +233,7 @@ Run the Linux suite without installing dependencies:
 cd ~/dev/agent-devkit
 node --test tests/devkit-linux.test.mjs
 node --test tests/devkit-linux-resources.test.mjs
+node --test tests/devkit-checkout-state.test.mjs
 git diff --check
 ```
 
