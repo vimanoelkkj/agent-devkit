@@ -79,6 +79,197 @@ agent-devkit/
 
 ## CLI Usage
 
+### Linux (Bash + Node.js 24)
+
+The independent `bin/agent-devkit.mjs` CLI requires Node.js 24+ and Git on
+`PATH`. It has no npm dependencies and does not invoke PowerShell. The
+existing PowerShell CLI and engine are unchanged.
+
+Start with this read-only preview in Bash:
+
+```bash
+cd ~/dev/agent-devkit
+node --version
+node bin/agent-devkit.mjs profile show chopp-delivery
+node bin/agent-devkit.mjs sync \
+  --profile chopp-delivery \
+  --project-dir "$HOME/dev/chopp-delivery" \
+  --dry-run
+```
+
+The `chopp-delivery` profile is restricted by the Node engine to the exact
+GitHub origin `vimanoelkkj/chopp-delivery` (HTTPS or SSH) and requires the
+`package.json` marker. It contains only `efficient-coding-workflow`,
+`minimal-diff`, `targeted-repo-search` and `targeted-validation`. It creates
+physical copies under `.agents/skills` and enables no Claude hooks, settings,
+R&P Doces components or third-party Skills. Git is used only to read local
+origin configuration, with includes disabled; no network is accessed.
+
+After reviewing the dry-run and obtaining authorization for the real sync:
+
+```bash
+node bin/agent-devkit.mjs sync \
+  --profile chopp-delivery \
+  --project-dir "$HOME/dev/chopp-delivery"
+node bin/agent-devkit.mjs verify \
+  --profile chopp-delivery \
+  --project-dir "$HOME/dev/chopp-delivery"
+```
+
+`verify` is always read-only and can also be run before installation; it
+returns exit code 1 when files or the lock are missing or out of sync.
+`sync --dry-run` writes nothing, including no directories, lock, transaction
+guard or Git exclude entries. Exit codes are 0 for successful sync/preview
+or verification, 1 for errors/failed verification, and 2 for a blocked sync
+(including dry-run). JSON output lists each target's state and the lock path.
+
+The Node implementation supports local core and profile Skills, `skills`,
+legacy `components.core/profile/skills`, and both array and object forms of
+`targets`. Supported Skills destinations are `.agents/skills` and
+`.claude/skills`; absent targets default to both, as in PowerShell. The Chopp
+profile explicitly selects only `.agents/skills`. Explicit `--manifest-file`
+overrides `--profile`, which overrides the project's `agent-devkit.json`,
+following the current engine's resolution order. A manifest/profile mismatch
+is refused. Manifests are never created or rewritten.
+
+Lock placement and schema follow the existing engine: if the project has
+`agent-devkit.json`, use its `agent-devkit.lock`; otherwise use
+`state/<profile>/agent-devkit.lock` in this DevKit. The latter is the sole
+managed-state write outside the consumer project; Skills destinations cannot
+escape the project. Locks retain `lockfileVersion: "1.0.0"`,
+`profile: "<name>@1.0.0"`, `generatedAt`, component maps, local provenance
+(`core` or `profile:<name>`), Skill version and per-file lowercase SHA-256.
+An unchanged sync preserves the lock bytes and timestamps. State is shared
+per profile as in PowerShell; use one checkout per profile with external
+state, or project manifests for separate checkout locks.
+
+All requested files are validated before writes. Local modifications,
+conflicts and untracked files in selected Skills targets block the entire
+sync; nothing is pruned. Retired locked Skills/files require explicit
+reconciliation. Traversal, absolute/Windows paths, symlinks (including dangling
+links and ancestors), hardlinks and special files are rejected. Sources are
+copied as static bytes: no Skill, hook, project script or downloaded code is
+executed. Nonempty third-party declarations, rules, agents, configs and
+overlays fail explicitly. Unsupported CLI options,
+including force, auto-discovery, custom state directories and Git exclude
+mutation, also fail rather than silently succeeding.
+
+Writes use exclusive temporary files, atomic per-file replacement and a
+project transaction guard; the lock is committed last. Recoverable I/O
+failures roll back prior writes, file modes and created directories. Rollback
+refuses to overwrite concurrent edits and reports incomplete recovery.
+This is not a crash-safe multi-file transaction: power loss, SIGKILL,
+filesystem failure or malicious concurrent directory replacement may require
+manual recovery. Do not run Node and PowerShell syncs simultaneously or
+modify targets during sync. A leftover `.agent-devkit-sync` guard must be
+reviewed and removed manually after ensuring no sync is running. SHA-256
+detects drift; it does not authenticate a tampered DevKit or lockfile.
+
+Run the Linux suite without installing dependencies:
+
+```bash
+cd ~/dev/agent-devkit
+node --test tests/devkit-linux.test.mjs
+node --test tests/devkit-linux-resources.test.mjs
+git diff --check
+```
+
+Tests use only temporary consumer projects, including a temporary Git origin
+for the Chopp profile. They cover installation, SHA-256/provenance, existing
+lock compatibility, verification, read-only dry-run, idempotence, conflicts,
+unsupported resources, traversal, links, special files, concurrency checks
+and rollback for injected write/rename failures. They never sync the actual
+Chopp Delivery checkout. The existing PowerShell suite requires Windows
+facilities such as `cmd /c mklink /J`; it cannot complete unchanged on Linux.
+
+### Linux local resources (stage 2A)
+
+The Linux engine uses one read-only plan and one rollback-capable transaction
+for Skills, local Hooks and local instructions. Each Skills destination is an
+independent physical copy and is checked separately. A conflict in any selected
+destination blocks the entire operation, including the lock update. Nothing is
+pruned or merged automatically. The existing `chopp-delivery` profile is
+unchanged: four core Skills, `.agents/skills` only, no Hooks or instructions.
+This capability does not opt that consumer into any additional resources.
+
+Supported declarations retain the PowerShell JSON schema: arrays of names,
+not objects with invented `source`, `target`, or execution fields. For example,
+an explicitly configured disposable profile/manifest can declare:
+
+```json
+{
+  "profile": "example",
+  "skills": ["minimal-diff"],
+  "hooks": ["guard-git-destructive.mjs"],
+  "instructions": ["AGENTS.md", "CLAUDE.md"],
+  "targets": {
+    "skills": [".agents/skills", ".claude/skills"],
+    "hooks": [".claude/hooks"]
+  }
+}
+```
+
+This example is not installed or activated by adding documentation. It requires
+an existing selected profile and explicit local instruction sources. Sources
+resolve first under `profiles/<selected-profile>/<category>/<name>`, then under
+`core/<category>/<name>`, matching PowerShell precedence. No other profile is
+searched. Provenance records the actual source as `profile:<name>` or `core`.
+Hooks specific to `rp-doces` are never fallback sources for another profile.
+No new Hooks or instruction files are bundled in this stage.
+
+The supported Linux resource subset is deliberately bounded:
+
+| Resource | Manifest declaration | Source directory | Allowed destination |
+| --- | --- | --- | --- |
+| Skills | `skills`, `components.core/profile/skills` | `skills/<name>/` | `.agents/skills/<name>/`, `.claude/skills/<name>/` |
+| Static Hooks | `hooks`, `components.hooks` | `hooks/<name>.mjs` | `.claude/hooks/<name>.mjs` |
+| Instructions | `instructions` | `instructions/AGENTS.md` or `instructions/CLAUDE.md` | Root `AGENTS.md` or `CLAUDE.md` |
+
+Hook names are single basenames matching letters/digits, hyphens and
+underscores with a `.mjs` extension. Other extensions, nested resource names,
+custom instruction targets, unknown target categories and declaration objects
+fail explicitly. `targets.hooks` defaults to `.claude/hooks`. Legacy target
+arrays classify entries containing `hook` as Hook targets; all entries still
+must match the allowlist. Resource-only profiles do not require a Skill.
+
+Existing unmanaged `AGENTS.md`, `CLAUDE.md` and requested Hook files block sync
+with `untracked`, even if byte-identical to the source. The engine does not
+adopt or merge them and has no force flag. Existing managed files can only be
+updated while their bytes still match their previous locked SHA-256. Otherwise
+the whole sync is blocked as `modified` or `conflict`. To preserve handwritten
+instructions, omit that declaration and review any future integration manually.
+Removing a locked resource declaration requires explicit reconciliation; it
+does not silently discard provenance or delete consumer files.
+
+Instruction distribution only places the explicitly requested files. It makes
+no claim that Codex, Claude Code and Antigravity discover the same files or
+apply the same precedence. Harness discovery and configuration require separate
+verification and authorization; no discovery rules are installed here.
+
+Hook distribution, registration in a harness, and actual execution are three
+different operations. This engine implements only distribution as static data
+with mode `0644` for new files. It never imports or executes Hooks, never adds
+event registrations, never creates or edits `.claude/settings.json`, and never
+modifies `.gitignore` or `.git/info/exclude`. It does not create or activate
+`guard-cloudflare-remote.mjs`.
+
+Lockfile version remains `1.0.0`. Skills continue using
+`skills.<name>.files.<relative-path>.sha256`; local single-file resources use
+`hooks.<name>` and `instructions.<name>` with `{ "source": "core", "sha256": "..." }`
+or the selected profile provenance. Existing metadata is retained, and unchanged
+compatible locks retain their exact bytes (including BOM/format) and timestamps.
+Changes to any supported resource map update the lock last. Invalid versions,
+resource maps, hashes, names and foreign-profile provenance fail before writing.
+Local third-party downloads, rules, agents, configs and overlays remain unsupported.
+
+The stage 2A suite exercises mixed-resource transactions, links, conflicts,
+resource isolation and actual bidirectional lock interoperability with the
+unchanged PowerShell engine. `pwsh` is required for the two cross-engine tests;
+if absent, those tests explicitly report skipped coverage. Contract compatibility
+does not imply identical security policy: Linux restricts destinations and refuses
+unmanaged instructions/Hooks even where PowerShell would adopt matching bytes.
+The complete legacy Windows suite still needs Windows junction facilities.
+
 The CLI script `bin/agent-devkit.ps1` supports PowerShell 7+ (`pwsh`) as well as Windows PowerShell 5.1 (`powershell.exe`).
 
 ### 1. Catalog & Skill Management

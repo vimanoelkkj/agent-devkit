@@ -1,0 +1,24 @@
+{
+  "name": "chopp-delivery",
+  "version": "1.0.0",
+  "description": "Local core Skills for vimanoelkkj/chopp-delivery on Linux with Bash and Node.js 24",
+  "skills": [
+    "efficient-coding-workflow",
+    "minimal-diff",
+    "targeted-repo-search",
+    "targeted-validation"
+  ],
+  "thirdPartySkills": [],
+  "hooks": [],
+  "instructions": [],
+  "rules": [],
+  "agents": [],
+  "configs": [],
+  "overlays": [],
+  "targets": { "skills": [".agents/skills"] },
+  "discovery": {
+    "githubRepository": "vimanoelkkj/chopp-delivery",
+    "homeDirectories": ["dev", "Projetos"],
+    "markers": ["package.json"]
+  }
+}
