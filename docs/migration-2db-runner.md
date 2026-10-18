@@ -12,6 +12,20 @@ Uma configuração JSON contém `devkitRoot`, `projectDir`, `heads` e `branches`
 
 Se já houver backups anteriores (como o rollback real da 2D-B), fornecer também `archiveInventory`, inventário completo e aprovado dos arquivos existentes sob `state/chopp-delivery/migration-backups/`. Sem esse inventário exato, o preflight reprova. Esses arquivos entram no conjunto protegido e não são movidos, editados ou apagados. Não há exceção genérica para estado scoped ou qualquer outro arquivo em `state/`.
 
+## Preflight público somente leitura
+
+```sh
+NODE_DISABLE_COMPILE_CACHE=1 node scripts/migrate-2db.mjs --preflight /tmp/2db/preflight-inputs.json
+```
+
+O comando reutiliza as verificações internas, retorna JSON em stdout e termina antes da preparação transacional: `status: "preflight-passed"` e exit code 0 para aprovação, `status: "preflight-blocked"` com diagnóstico e exit code 1 para bloqueio, inclusive JSON/argumentos inválidos. Em ambos os casos `readOnly` é true. Não cria configuração, diretório, backup, journal ou guard, não importa a engine e não chama callbacks de execução ou recuperação. A API equivalente é `preflightMigration(config)`.
+
+O campo `mode: "scratch"` aceita clones em `/tmp`; sem `mode`, a validação exige as duas raízes reais exatas já definidas pelo executor. Esse campo controla apenas a fronteira de caminhos: `--preflight` nunca inicia `runMigration()`, independentemente do conteúdo do JSON. Não há opção para ignorar Git sujo, guards ou inventários divergentes. Aprovação do preflight não autoriza migração.
+
+As leituras Git dessa entrada isolam as variáveis `GIT_*`, ignoram configuração global/system, desabilitam hooks, fsmonitor executável e atualização opcional do index. Filtros Git locais `clean`/`process`, incluindo configurações incluídas, bloqueiam o preflight antes de `status`, que poderia executá-los; não são contornados para produzir aprovação. O diagnóstico também verifica origin/markers exclusivos, compatibilidade do lock legado, recursos permitidos, mesmo filesystem para os renames, machine-id Linux válido e journals anteriores encerrados, inclusive guards.json quando presente. O reconhecedor de processos inclui `MainThread`, nome usado pelo Node 24 no Linux. As entradas de execução/recuperação mantêm seu leitor e sequência transacional anteriores.
+
+Leituras podem atualizar atime. `NODE_DISABLE_COMPILE_CACHE=1` evita gravações de cache do runtime Node configurado externamente; a aplicação escreve somente o diagnóstico em stdout. Os testes bloqueiam APIs de mutação e comparam conteúdo, inode, modo, nlink, mtime/ctime, diretórios e metadados Git antes/depois, incluindo aprovação, falhas, configuração fsmonitor e ambiente Git hostis.
+
 Comandos de ensaio (somente `/tmp`, config de cada clone):
 
 ```sh
@@ -58,6 +72,7 @@ Uma execução de migração que fez rollback continua retornando falha no CLI, 
 
 ```sh
 node --test tests/migration-guards.test.mjs tests/migrate-2db.test.mjs
+node --test tests/migration-preflight.test.mjs
 node --test tests/devkit-linux.test.mjs tests/devkit-linux-resources.test.mjs tests/devkit-checkout-state.test.mjs
 node --check scripts/migrate-2db.mjs
 node --check scripts/migration-guards.mjs

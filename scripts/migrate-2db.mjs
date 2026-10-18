@@ -31,7 +31,6 @@ const walk = dir => !exists(dir) ? [] : (safe(dir), fs.readdirSync(dir).sort().f
   const f = path.join(dir, n); safe(f); return fs.lstatSync(f).isDirectory() ? walk(f) : [f];
 }));
 const edits = ['profiles/chopp-delivery/profile.json', 'tests/devkit-linux.test.mjs', 'tests/devkit-linux-resources.test.mjs'];
-const trimGit = (root, ...args) => git(root, ...args).trim();
 const replacements = [
   [['"targets": { "skills": [".agents/skills"] }', '"targets": { "skills": [".agents/skills", ".claude/skills"] }']],
   [['assert.equal(sync(f.options).written, 4);', 'assert.equal(sync(f.options).written, 8);'],
@@ -106,7 +105,9 @@ class Migration {
     fs.writeFileSync(path.join(this.base, `${kind}.json`), JSON.stringify(result, null, 2)); return result;
   }
   expected() { return { [this.D]: Object.fromEntries(this.j.edits.filter(e => e.state !== 'restored').map(e => [path.relative(this.D, e.file), e.expectedHash])) }; }
-  preflight() {
+  preflight(readGit = git, writerCommand = /^(node|nodejs|pwsh|powershell)$/) {
+    const git = readGit;
+    const trimGit = (root, ...args) => git(root, ...args).trim();
     const { D, C } = this, inventory = this.config.inventory;
     assert(inventory && Object.keys(inventory).length); same(inventory);
     for (const root of [D, C]) {
@@ -119,7 +120,7 @@ class Migration {
     }
     const processes = execFileSync('ps', ['-eo', 'pid=,comm=,args='], { encoding: 'utf8' }).split('\n').filter(line => {
       const m = line.trim().match(/^(\d+)\s+(\S+)\s+(.*)$/);
-      return m && Number(m[1]) !== process.pid && /^(node|nodejs|pwsh|powershell)$/.test(m[2]) &&
+      return m && Number(m[1]) !== process.pid && writerCommand.test(m[2]) &&
         [D, C].some(root => m[3].includes(root)) && /agent-devkit\.(mjs|ps1).*\bsync\b|sync-profile\.ps1|(?:^|\s)\S*\/migrate-2db\.mjs(?:\s|$)/.test(m[3]);
     });
     assert.deepEqual(processes, [], 'concurrent writer process');
@@ -287,6 +288,73 @@ class Migration {
   }
 }
 
+// No Transaction, journal, engine import or mutation is reachable through this entry.
+export function preflightMigration(config) {
+  try {
+    const migration = new Migration({ ...config, mode: config?.mode ?? 'execute' });
+    // Disable optional Git writes and executable fsmonitor configuration. Do not
+    // inherit GIT_DIR/INDEX_FILE/config injection from the caller's environment.
+    const readEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
+    Object.assign(readEnv, { GIT_OPTIONAL_LOCKS: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' });
+    const gitArgs = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'diff.autoRefreshIndex=false'];
+    const gitOptions = root => ({ cwd: root, env: readEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const readGit = (root, ...args) => {
+      if (args[0] === 'status') {
+        // Status may otherwise execute clean/process filters while hashing files.
+        const filters = spawnSync('git', [...gitArgs, 'config', '--includes', '--get-regexp', '^filter\\..*\\.(clean|process)$'], gitOptions(root));
+        assert([0, 1].includes(filters.status) && !filters.stderr, 'cannot inspect Git filters');
+        assert(!filters.stdout.trim(), 'external Git clean/process filters block read-only preflight');
+      }
+      return execFileSync('git', [...gitArgs, ...args], gitOptions(root));
+    };
+    // Node 24 can expose its process comm as MainThread on Linux.
+    const initial = migration.preflight(readGit, /^(node|nodejs|MainThread|pwsh|powershell)$/);
+    const { D, C } = migration;
+    const profile = JSON.parse(read(`${D}/profiles/chopp-delivery/profile.json`));
+    const origin = readGit(C, 'config', '--local', '--no-includes', '--get', 'remote.origin.url').trim();
+    const repository = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(origin);
+    assert(repository && profile.discovery?.githubRepository &&
+      repository[1].toLowerCase() === profile.discovery.githubRepository.toLowerCase(), 'exclusive Git origin mismatch');
+    for (const marker of profile.discovery.markers ?? []) {
+      assert(!path.isAbsolute(marker) && !marker.split('/').includes('..'), 'unsafe project marker');
+      const file = path.join(C, marker); safe(file); assert(exists(file), `missing project marker: ${marker}`);
+    }
+    assert.equal(initial.legacy.lockfileVersion, '1.0.0', 'incompatible legacy lock version');
+    assert.deepEqual(Object.keys(initial.legacy.skills).sort(), profile.skills.toSorted(), 'unexpected legacy Skills');
+    for (const skill of profile.skills) {
+      assert.equal(initial.legacy.skills[skill].version, '1.0.0', 'incompatible legacy Skill version');
+      assert.deepEqual(Object.keys(initial.legacy.skills[skill].files), ['SKILL.md'], 'unexpected legacy Skill files');
+    }
+    for (const section of ['hooks', 'instructions', 'rules', 'agents', 'configs', 'overlays']) {
+      assert.deepEqual(profile[section] ?? [], [], `unexpected profile resource: ${section}`);
+      assert.deepEqual(initial.legacy[section] ?? {}, {}, `unexpected legacy resource: ${section}`);
+    }
+    assert.equal(fs.statSync(path.dirname(initial.flat)).dev, fs.statSync(`${C}/agent-devkit.lock`).dev,
+      'cross-filesystem migration would prevent no-overwrite renames');
+    safe('/etc/machine-id');
+    assert(/^[a-f0-9]{32}$/i.test(read('/etc/machine-id').toString('utf8').trim()), 'valid Linux machine-id required');
+    const archiveRoot = `${D}/state/chopp-delivery/migration-backups`;
+    let journals = 0;
+    for (const file of Object.keys(config.archiveInventory ?? {})) {
+      if (path.basename(file) !== 'journal.json' || path.dirname(path.dirname(file)) !== archiveRoot) continue;
+      const journal = JSON.parse(read(file)); journals++;
+      assert(['rolled-back', 'completed'].includes(journal.status), `unsettled migration journal: ${file}`);
+      for (const guard of journal.guards ?? []) assert(!exists(guard.file), `previous journal guard still exists: ${guard.file}`);
+      const guardsFile = path.join(path.dirname(file), 'guards.json');
+      if (exists(guardsFile)) {
+        const guards = JSON.parse(read(guardsFile));
+        assert.equal(guards.id, journal.id, 'archive journal identity mismatch');
+        assert(guards.guards.every(g => g.state === 'released' && !exists(g.file)), 'unsettled archive guards');
+      }
+    }
+    return { status: 'preflight-passed', readOnly: true, devkitRoot: D, projectDir: C,
+      protectedFiles: Object.keys(initial.protectedBefore).length, skills: initial.skills.length,
+      archiveFiles: Object.keys(config.archiveInventory ?? {}).length, journals };
+  } catch (error) {
+    return { status: 'preflight-blocked', readOnly: true, error: String(error.message ?? error) };
+  }
+}
+
 export const runMigration = async config => new Migration(config).run();
 export function recoverMigration(base, { mode = 'scratch' } = {}) {
   assert(path.isAbsolute(base));
@@ -308,13 +376,17 @@ export function recoverMigration(base, { mode = 'scratch' } = {}) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const [mode, file, ...extra] = process.argv.slice(2); assert.equal(extra.length, 0);
-    assert(['--scratch', '--recover-scratch', '--execute', '--recover'].includes(mode) && file,
-      'usage: node scripts/migrate-2db.mjs --scratch CONFIG.json | --recover-scratch BASE; --execute/--recover require separate real-execution authorization');
-    const result = mode === '--scratch' || mode === '--execute'
+    assert(['--preflight', '--scratch', '--recover-scratch', '--execute', '--recover'].includes(mode) && file,
+      'usage: node scripts/migrate-2db.mjs --preflight CONFIG.json | --scratch CONFIG.json | --recover-scratch BASE; --execute/--recover require separate real-execution authorization');
+    const result = mode === '--preflight' ? preflightMigration(JSON.parse(read(file))) : mode === '--scratch' || mode === '--execute'
       ? await runMigration({ ...JSON.parse(read(file)), mode: mode === '--scratch' ? 'scratch' : 'execute' })
       : recoverMigration(file, { mode: mode === '--recover-scratch' ? 'scratch' : 'execute' });
     console.log(JSON.stringify(result, null, 2));
     const recovery = mode === '--recover-scratch' || mode === '--recover';
-    process.exitCode = result.status === (recovery ? 'rolled-back' : 'completed') ? 0 : 1;
-  } catch (error) { console.error(String(error.stack ?? error)); process.exitCode = 1; }
+    process.exitCode = result.status === (mode === '--preflight' ? 'preflight-passed' : recovery ? 'rolled-back' : 'completed') ? 0 : 1;
+  } catch (error) {
+    if (process.argv[2] === '--preflight') console.log(JSON.stringify({ status: 'preflight-blocked', readOnly: true, error: String(error.message ?? error) }, null, 2));
+    else console.error(String(error.stack ?? error));
+    process.exitCode = 1;
+  }
 }
