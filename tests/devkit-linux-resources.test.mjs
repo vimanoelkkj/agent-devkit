@@ -365,6 +365,7 @@ test('legacy Skills-only lock remains byte-compatible with the unchanged Chopp c
       source: 'core', version: '1.0.0', files: { 'SKILL.md': { sha256: digest(fs.readFileSync(path.join(repository, 'core/skills', skill, 'SKILL.md'))) } },
     }])), hooks: {}, instructions: {}, rules: {}, agents: {}, configs: {}, overlays: {} }, null, 2));
   delete profile.discovery; // This disposable fixture intentionally has no Git origin.
+  profile.targets.skills = ['.agents/skills']; // Freeze the legacy composition exercised here.
   put(path.join(f.devkitRoot, 'profiles/chopp-delivery/profile.json'), JSON.stringify(profile));
   for (const skill of profile.skills) {
     fs.cpSync(path.join(repository, 'core/skills', skill), path.join(f.devkitRoot, 'core/skills', skill), { recursive: true });

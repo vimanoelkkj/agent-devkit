@@ -320,15 +320,16 @@ test('Chopp profile is exclusive, has exactly four core Skills and installs no C
   assert.throws(() => sync(f.options), /exclusive/);
   assert.deepEqual(snapshot(f.root), before);
   f.origin('git@github.com:vimanoelkkj/chopp-delivery.git');
-  assert.equal(sync(f.options).written, 4);
+  assert.equal(sync(f.options).written, 8);
   assert.equal(verify(f.options).verified, true);
-  assert.equal(fs.existsSync(path.join(f.projectDir, '.claude')), false);
+  assert.equal(fs.existsSync(path.join(f.projectDir, '.claude/hooks')), false);
+  assert.deepEqual(p.instructions, []);
 });
 for (const origin of ['https://github.com/vimanoelkkj/chopp-delivery.git', 'ssh://git@github.com/vimanoelkkj/chopp-delivery.git', 'https://github.com/vimanoelkkj/chopp-delivery']) {
   test(`accepts exact GitHub origin ${origin}`, t => {
     const f = fixture(t, { chopp: true });
     f.origin(origin);
-    assert.equal(plan(f.options).state.length, 4);
+    assert.equal(plan(f.options).state.length, 8);
   });
 }
 test('CLI profile show, read-only dry-run, verify exit codes and unsupported options', t => {

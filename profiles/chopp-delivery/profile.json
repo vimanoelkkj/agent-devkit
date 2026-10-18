@@ -15,7 +15,7 @@
   "agents": [],
   "configs": [],
   "overlays": [],
-  "targets": { "skills": [".agents/skills"] },
+  "targets": { "skills": [".agents/skills", ".claude/skills"] },
   "discovery": {
     "githubRepository": "vimanoelkkj/chopp-delivery",
     "homeDirectories": ["dev", "Projetos"],
