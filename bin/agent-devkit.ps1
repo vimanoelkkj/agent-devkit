@@ -36,7 +36,11 @@ param(
     [switch]$AutoDiscover,
 
     [Parameter(Mandatory = $false)]
-    [string[]]$SearchRoots
+    [string[]]$SearchRoots,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("checkout")]
+    [string]$StateScope = $null
 )
 
 $ErrorActionPreference = "Stop"
@@ -74,6 +78,15 @@ else {
     $ProjectDir = (Resolve-Path $ProjectDir).Path
 }
 
+if ($StateScope) {
+    if ($Command -notin @("sync", "verify")) {
+        throw "-StateScope is supported only for sync and verify."
+    }
+    if ([string]::IsNullOrWhiteSpace($Profile) -or -not [string]::IsNullOrWhiteSpace($ManifestFile)) {
+        throw "Checkout state requires -Profile and forbids -ManifestFile"
+    }
+}
+
 $explicitManifest = $null
 if (-not [string]::IsNullOrWhiteSpace($ManifestFile)) {
     if (Test-Path $ManifestFile -PathType Leaf) {
@@ -90,6 +103,9 @@ if ($Command -in @("sync", "verify")) {
     Write-Host "Project Dir: $ProjectDir" -ForegroundColor DarkGray
     if ($Profile) {
         Write-Host "Profile:     $Profile" -ForegroundColor DarkGray
+    }
+    if ($StateScope) {
+        Write-Host "State Scope: $StateScope" -ForegroundColor DarkGray
     }
     if ($StateDir) {
         Write-Host "State Dir:   $StateDir" -ForegroundColor DarkGray
@@ -330,7 +346,7 @@ switch ($Command) {
     }
 
     "verify" {
-        $result = Invoke-DevKitVerify -ProjectDir $ProjectDir -Profile $Profile -StateDir $StateDir -Manifest $explicitManifest -DevKitRoot $devKitRoot
+        $result = Invoke-DevKitVerify -ProjectDir $ProjectDir -Profile $Profile -StateDir $StateDir -Manifest $explicitManifest -DevKitRoot $devKitRoot -StateScope $StateScope
         Write-Host "Total Managed Targets: $($result.TotalFiles)"
 
         if ($result.Verified) {
@@ -345,7 +361,7 @@ switch ($Command) {
     }
 
     "sync" {
-        $result = Invoke-DevKitSync -ProjectDir $ProjectDir -Profile $Profile -StateDir $StateDir -Manifest $explicitManifest -DryRun:$DryRun -NoGitExclude:$NoGitExclude -DevKitRoot $devKitRoot
+        $result = Invoke-DevKitSync -ProjectDir $ProjectDir -Profile $Profile -StateDir $StateDir -Manifest $explicitManifest -DryRun:$DryRun -NoGitExclude:$NoGitExclude -DevKitRoot $devKitRoot -StateScope $StateScope
 
         Write-Host "Execution Summary:"
         Write-Host "  Total Files Evaluated: $($result.TotalFiles)"

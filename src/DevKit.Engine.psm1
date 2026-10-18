@@ -2,11 +2,21 @@
 # PowerShell Engine for agent-devkit
 
 function Get-DevKitSha256 {
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName = "Path")]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
+        [Parameter(Mandatory = $true, ParameterSetName = "Path", Position = 0)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true, ParameterSetName = "Content")]
+        [string]$Content
     )
+
+    if ($PSCmdlet.ParameterSetName -eq "Content") {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Content)
+        $hashBytes = $sha.ComputeHash($bytes)
+        return ($hashBytes | ForEach-Object { $_.ToString("x2") }) -join ""
+    }
 
     if (-not (Test-Path -Path $Path -PathType Leaf)) {
         return $null
@@ -14,6 +24,216 @@ function Get-DevKitSha256 {
 
     $hash = Get-FileHash -Path $Path -Algorithm SHA256
     return $hash.Hash.ToLowerInvariant()
+}
+
+function Test-DevKitSamePath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PathA,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PathB
+    )
+
+    if ($PathA -eq $PathB) { return $true }
+    if ($IsWindows -or ($env:OS -like "*Windows*")) {
+        $fullA = [System.IO.Path]::GetFullPath($PathA).TrimEnd('\', '/')
+        $fullB = [System.IO.Path]::GetFullPath($PathB).TrimEnd('\', '/')
+        return $fullA.ToLowerInvariant() -eq $fullB.ToLowerInvariant()
+    }
+    return $false
+}
+
+function Get-DevKitOriginRepository {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectDir
+    )
+
+    $url = (& git -C $ProjectDir remote get-url origin 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($url)) {
+        throw "Origin must be an exact GitHub HTTPS or SSH repository URL"
+    }
+    $url = ($url -join "").Trim()
+    if ($url -match '^(?:https:\/\/github\.com\/|git@github\.com:)([^/\s]+\/[^/\s]+?)(?:\.git)?$') {
+        return $Matches[1].ToLowerInvariant()
+    }
+    throw "Origin must be an exact GitHub HTTPS or SSH repository URL"
+}
+
+function Get-DevKitMachineId {
+    [CmdletBinding()]
+    param()
+
+    if ($IsWindows -or ($env:OS -like "*Windows*")) {
+        $guid = $null
+        try {
+            $regExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot "System32\reg.exe" } else { "reg.exe" }
+            $raw = (& $regExe query "HKLM\SOFTWARE\Microsoft\Cryptography" /v MachineGuid 2>&1) | Out-String
+            if ($raw -match 'MachineGuid\s+REG_SZ\s+([a-f0-9-]+)') {
+                $guid = $Matches[1]
+            }
+        } catch {
+            throw "Failed to query Windows MachineGuid for checkout state"
+        }
+        if (-not $guid -or $guid -notmatch '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$') {
+            throw "A valid Windows MachineGuid is required for checkout state"
+        }
+        return Get-DevKitSha256 -Content $guid.ToLowerInvariant()
+    } else {
+        if (-not (Test-Path "/etc/machine-id" -PathType Leaf)) {
+            throw "A valid Linux machine-id is required for checkout state"
+        }
+        $raw = [System.IO.File]::ReadAllText("/etc/machine-id", [System.Text.Encoding]::UTF8).Trim()
+        if (-not $raw -or $raw -notmatch '^[a-f0-9]{32}$') {
+            throw "A valid Linux machine-id is required for checkout state"
+        }
+        return Get-DevKitSha256 -Content $raw
+    }
+}
+
+function Get-DevKitFileStamp {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $resolvedPath = (Resolve-Path $Path).Path
+
+    if (-not ($IsWindows -or ($env:OS -like "*Windows*"))) {
+        $statOut = & stat -c "%d %i" $resolvedPath 2>$null
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($statOut)) {
+            $parts = ($statOut -join "").Trim().Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)
+            if ($parts.Length -eq 2) {
+                return [ordered]@{
+                    device = $parts[0]
+                    inode  = $parts[1]
+                }
+            }
+        }
+    }
+
+    try {
+        $nodeCmd = Get-Command "node" -ErrorAction SilentlyContinue
+        if ($nodeCmd) {
+            $script = "const fs = require('fs'); const s = fs.statSync(process.argv[1], { bigint: true }); console.log(s.dev.toString() + ' ' + s.ino.toString());"
+            $nodeOut = & node -e $script $resolvedPath 2>$null
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($nodeOut)) {
+                $parts = ($nodeOut -join "").Trim().Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)
+                if ($parts.Length -eq 2) {
+                    return [ordered]@{
+                        device = $parts[0]
+                        inode  = $parts[1]
+                    }
+                }
+            }
+        }
+    } catch {}
+
+    throw "Unable to determine filesystem stamp for $Path"
+}
+
+function Get-DevKitCheckoutIdentity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectDir
+    )
+
+    $dotGit = Join-Path $ProjectDir ".git"
+    if (-not (Test-Path $dotGit)) {
+        throw "Checkout state requires a Git checkout root"
+    }
+
+    $topRaw = $null
+    $gitDirRaw = $null
+    $commonDirRaw = $null
+
+    $savedEnv = @{}
+    $envVars = [System.Environment]::GetEnvironmentVariables()
+    foreach ($k in $envVars.Keys) {
+        if ($k -like "GIT_*") {
+            $savedEnv[$k] = [System.Environment]::GetEnvironmentVariable($k)
+            [System.Environment]::SetEnvironmentVariable($k, $null)
+        }
+    }
+    $globalConfig = if ($IsWindows -or ($env:OS -like "*Windows*")) { "NUL" } else { "/dev/null" }
+    [System.Environment]::SetEnvironmentVariable("GIT_CONFIG_NOSYSTEM", "1")
+    [System.Environment]::SetEnvironmentVariable("GIT_CONFIG_GLOBAL", $globalConfig)
+
+    try {
+        $gitOut = (& git -C $ProjectDir -c "core.hooksPath=/dev/null" rev-parse --path-format=absolute --show-toplevel --git-dir --git-common-dir 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Invalid Git checkout identity"
+        }
+        $lines = @($gitOut | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($lines.Count -ne 3) {
+            throw "Invalid Git checkout identity"
+        }
+        $topRaw = $lines[0].Trim()
+        $gitDirRaw = $lines[1].Trim()
+        $commonDirRaw = $lines[2].Trim()
+    }
+    finally {
+        [System.Environment]::SetEnvironmentVariable("GIT_CONFIG_NOSYSTEM", $null)
+        [System.Environment]::SetEnvironmentVariable("GIT_CONFIG_GLOBAL", $null)
+        foreach ($k in $savedEnv.Keys) {
+            [System.Environment]::SetEnvironmentVariable($k, $savedEnv[$k])
+        }
+    }
+
+    $top = if (-not ($IsWindows -or ($env:OS -like "*Windows*"))) { (& realpath $topRaw 2>$null).Trim() } else { [System.IO.Path]::GetFullPath((Resolve-Path $topRaw).Path) }
+    $gitDir = if (-not ($IsWindows -or ($env:OS -like "*Windows*"))) { (& realpath $gitDirRaw 2>$null).Trim() } else { [System.IO.Path]::GetFullPath((Resolve-Path $gitDirRaw).Path) }
+    $commonDir = if (-not ($IsWindows -or ($env:OS -like "*Windows*"))) { (& realpath $commonDirRaw 2>$null).Trim() } else { [System.IO.Path]::GetFullPath((Resolve-Path $commonDirRaw).Path) }
+
+    if (-not (Test-DevKitSamePath $top $ProjectDir)) {
+        throw "Project directory must be the Git checkout root"
+    }
+
+    foreach ($dir in @($gitDir, $commonDir) | Select-Object -Unique) {
+        foreach ($file in @("config", "config.worktree", "commondir", "gitdir")) {
+            $fPath = Join-Path $dir $file
+            if (Test-Path $fPath) {
+                $item = Get-Item -LiteralPath $fPath -Force
+                if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint) {
+                    throw "Reparse point detected in Git control directory: $fPath"
+                }
+            }
+        }
+    }
+
+    $machine = Get-DevKitMachineId
+    $projectStamp = Get-DevKitFileStamp -Path $top
+    $gitStamp = Get-DevKitFileStamp -Path $gitDir
+    $origin = Get-DevKitOriginRepository -ProjectDir $ProjectDir
+
+    $identity = [ordered]@{
+        version    = 1
+        machine    = $machine
+        projectDir = $top
+        gitDir     = $gitDir
+        commonDir  = $commonDir
+        project    = [ordered]@{
+            device = [string]$projectStamp.device
+            inode  = [string]$projectStamp.inode
+        }
+        git        = [ordered]@{
+            device = [string]$gitStamp.device
+            inode  = [string]$gitStamp.inode
+        }
+        origin     = $origin
+    }
+
+    $json = (($identity | ConvertTo-Json -Depth 5) -replace "\r\n", "`n") + "`n"
+    $id = Get-DevKitSha256 -Content $json
+
+    return [PSCustomObject]@{
+        Identity = $identity
+        Id       = $id
+    }
 }
 
 function Resolve-DevKitComponent {
@@ -911,9 +1131,12 @@ function Fetch-DevKitThirdParty {
         [string]$MockDir = $null
     )
 
-    $gitCmd = Get-Command "git.exe" -ErrorAction SilentlyContinue
+    $gitCmd = Get-Command "git" -ErrorAction SilentlyContinue
     if ($null -eq $gitCmd) {
-        throw "git.exe is required for third-party component acquisition, but was not found in PATH."
+        $gitCmd = Get-Command "git.exe" -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $gitCmd) {
+        throw "git is required for third-party component acquisition, but was not found in PATH."
     }
 
     $repo = $RegistryEntry.repo
@@ -1097,8 +1320,49 @@ function Get-DevKitLockPath {
         [string]$StateDir = $null,
 
         [Parameter(Mandatory = $false)]
-        [string]$DevKitRoot = $null
+        [string]$DevKitRoot = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string]$StateScope = $null
     )
+
+    if (-not [string]::IsNullOrWhiteSpace($StateScope)) {
+        if ($StateScope -ne "checkout") {
+            throw "Unsupported state scope"
+        }
+        if ([string]::IsNullOrWhiteSpace($ProfileName)) {
+            throw "Checkout state requires -Profile"
+        }
+        if ([string]::IsNullOrWhiteSpace($DevKitRoot)) {
+            throw "Checkout state requires DevKitRoot"
+        }
+
+        $localManifest = Join-Path $ProjectDir "agent-devkit.json"
+        $localLock = Join-Path $ProjectDir "agent-devkit.lock"
+        if ((Test-Path -Path $localManifest -PathType Leaf) -or (Test-Path -Path $localLock -PathType Leaf)) {
+            throw "Checkout state forbids consumer manifest and lock; migrate them explicitly first"
+        }
+
+        $profileObj = Get-DevKitProfile -ProfileName $ProfileName -DevKitRoot $DevKitRoot
+        if ($null -eq $profileObj -or $null -eq $profileObj.discovery -or [string]::IsNullOrWhiteSpace($profileObj.discovery.githubRepository)) {
+            throw "Checkout state requires an exclusive profile Git origin"
+        }
+        $origin = Get-DevKitOriginRepository -ProjectDir $ProjectDir
+        if ($origin -ne $profileObj.discovery.githubRepository.ToLowerInvariant()) {
+            throw "Project origin does not match exclusive profile repository"
+        }
+        if ($profileObj.discovery.markers) {
+            foreach ($marker in $profileObj.discovery.markers) {
+                if (-not (Test-Path (Join-Path $ProjectDir $marker))) {
+                    throw "Missing project marker: $marker"
+                }
+            }
+        }
+
+        $checkout = Get-DevKitCheckoutIdentity -ProjectDir $ProjectDir
+        $stateBase = Join-Path $DevKitRoot "state\$ProfileName\checkouts\$($checkout.Id)"
+        return (Join-Path $stateBase "agent-devkit.lock")
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($StateDir)) {
         return (Join-Path $StateDir "agent-devkit.lock")
@@ -1130,13 +1394,49 @@ function Get-DevKitLock {
         [string]$StateDir = $null,
 
         [Parameter(Mandatory = $false)]
-        [string]$DevKitRoot = $null
+        [string]$DevKitRoot = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string]$StateScope = $null
     )
 
-    $lockPath = Get-DevKitLockPath -ProjectDir $ProjectDir -ProfileName $ProfileName -StateDir $StateDir -DevKitRoot $DevKitRoot
+    $lockPath = Get-DevKitLockPath -ProjectDir $ProjectDir -ProfileName $ProfileName -StateDir $StateDir -DevKitRoot $DevKitRoot -StateScope $StateScope
     if (Test-Path -Path $lockPath -PathType Leaf) {
         $content = [System.IO.File]::ReadAllText($lockPath, [System.Text.Encoding]::UTF8)
-        return $content | ConvertFrom-Json
+        $lock = $content | ConvertFrom-Json
+
+        if ($StateScope -eq "checkout") {
+            $checkout = Get-DevKitCheckoutIdentity -ProjectDir $ProjectDir
+            if ($null -eq $lock -or $null -eq $lock.checkoutState) {
+                throw "Checkout state binding mismatch (foreign, missing or incompatible ownership)"
+            }
+
+            $cs = $lock.checkoutState
+            $id = $checkout.Identity
+            $mismatch = $false
+            if ($cs.version -ne $id.version -or
+                $cs.machine -ne $id.machine -or
+                $cs.origin -ne $id.origin -or
+                $cs.profile -ne $ProfileName) {
+                $mismatch = $true
+            }
+            if (-not (Test-DevKitSamePath $cs.projectDir $id.projectDir)) { $mismatch = $true }
+            if (-not (Test-DevKitSamePath $cs.gitDir $id.gitDir)) { $mismatch = $true }
+            if (-not (Test-DevKitSamePath $cs.commonDir $id.commonDir)) { $mismatch = $true }
+            if ([string]$cs.project.device -ne [string]$id.project.device -or [string]$cs.project.inode -ne [string]$id.project.inode) { $mismatch = $true }
+            if ([string]$cs.git.device -ne [string]$id.git.device -or [string]$cs.git.inode -ne [string]$id.git.inode) { $mismatch = $true }
+
+            if ($mismatch) {
+                throw "Checkout state binding mismatch (foreign, missing or incompatible ownership)"
+            }
+        }
+        else {
+            if ($null -ne $lock -and ($lock.PSObject.Properties.Match("checkoutState").Count -gt 0 -and $null -ne $lock.checkoutState)) {
+                throw "Checkout state binding mismatch (foreign, missing or incompatible ownership)"
+            }
+        }
+
+        return $lock
     }
     return $null
 }
@@ -1157,16 +1457,45 @@ function Save-DevKitLock {
         [string]$StateDir = $null,
 
         [Parameter(Mandatory = $false)]
-        [string]$DevKitRoot = $null
+        [string]$DevKitRoot = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string]$StateScope = $null
     )
 
-    $lockPath = Get-DevKitLockPath -ProjectDir $ProjectDir -ProfileName $ProfileName -StateDir $StateDir -DevKitRoot $DevKitRoot
+    $lockPath = Get-DevKitLockPath -ProjectDir $ProjectDir -ProfileName $ProfileName -StateDir $StateDir -DevKitRoot $DevKitRoot -StateScope $StateScope
     $lockDir = Split-Path -Parent $lockPath
     if (-not (Test-Path $lockDir)) {
         New-Item -ItemType Directory -Path $lockDir -Force | Out-Null
     }
 
-    $json = $LockObject | ConvertTo-Json -Depth 100
+    if ($StateScope -eq "checkout") {
+        $checkout = Get-DevKitCheckoutIdentity -ProjectDir $ProjectDir
+        $binding = [ordered]@{
+            version    = $checkout.Identity.version
+            machine    = $checkout.Identity.machine
+            projectDir = $checkout.Identity.projectDir
+            gitDir     = $checkout.Identity.gitDir
+            commonDir  = $checkout.Identity.commonDir
+            project    = [ordered]@{
+                device = $checkout.Identity.project.device
+                inode  = $checkout.Identity.project.inode
+            }
+            git        = [ordered]@{
+                device = $checkout.Identity.git.device
+                inode  = $checkout.Identity.git.inode
+            }
+            origin     = $checkout.Identity.origin
+            profile    = $ProfileName
+        }
+        if ($LockObject.PSObject.Properties.Match("checkoutState").Count -eq 0) {
+            $LockObject | Add-Member -NotePropertyName "checkoutState" -NotePropertyValue $binding
+        } else {
+            $LockObject.checkoutState = $binding
+        }
+    }
+
+    $json = (($LockObject | ConvertTo-Json -Depth 100) -replace "\r\n", "`n") + "`n"
     [System.IO.File]::WriteAllText($lockPath, $json, [System.Text.UTF8Encoding]::new($false))
 }
 
@@ -2050,8 +2379,20 @@ function Invoke-DevKitSync {
         [psobject]$Manifest = $null,
 
         [Parameter(Mandatory = $true)]
-        [string]$DevKitRoot
+        [string]$DevKitRoot,
+
+        [Parameter(Mandatory = $false)]
+        [string]$StateScope = $null
     )
+
+    if ($StateScope) {
+        if ($StateScope -ne "checkout") {
+            throw "Unsupported state scope"
+        }
+        if (-not $Profile) {
+            throw "Checkout state requires -Profile"
+        }
+    }
 
     if ($null -eq $Manifest) {
         if (-not [string]::IsNullOrWhiteSpace($Profile)) {
@@ -2065,7 +2406,7 @@ function Invoke-DevKitSync {
     }
 
     $activeProfile = if (-not [string]::IsNullOrWhiteSpace($Profile)) { $Profile } else { $Manifest.profile }
-    $lock = Get-DevKitLock -ProjectDir $ProjectDir -ProfileName $activeProfile -StateDir $StateDir -DevKitRoot $DevKitRoot
+    $lock = Get-DevKitLock -ProjectDir $ProjectDir -ProfileName $activeProfile -StateDir $StateDir -DevKitRoot $DevKitRoot -StateScope $StateScope
     $state = Test-DevKitProjectState -ProjectDir $ProjectDir -Manifest $Manifest -Lock $lock -DevKitRoot $DevKitRoot
 
     $syncedCount = 0
@@ -2080,6 +2421,9 @@ function Invoke-DevKitSync {
     $newLockAgents = @{}
     $newLockConfigs = @{}
     $newLockOverlays = @{}
+    $guardFile = $null
+    $guardStream = $null
+    $guardAcquired = $false
 
     try {
         foreach ($item in $state) {
@@ -2195,6 +2539,17 @@ function Invoke-DevKitSync {
         }
 
         if (-not $DryRun -and $blockedCount -eq 0) {
+            if ($StateScope -eq "checkout") {
+                $checkout = Get-DevKitCheckoutIdentity -ProjectDir $ProjectDir
+                $guardFile = Join-Path $DevKitRoot ".agent-devkit-checkout-$($checkout.Id).sync"
+                $legacyGuard = Join-Path $ProjectDir ".agent-devkit-sync"
+                if (Test-Path $legacyGuard) {
+                    throw "Legacy sync guard exists for this checkout"
+                }
+                $guardStream = [System.IO.File]::Open($guardFile, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+                $guardAcquired = $true
+            }
+
             $newLock = [PSCustomObject]@{
                 lockfileVersion = "1.0.0"
                 generatedAt     = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
@@ -2207,7 +2562,7 @@ function Invoke-DevKitSync {
                 configs         = $newLockConfigs
                 overlays        = $newLockOverlays
             }
-            Save-DevKitLock -ProjectDir $ProjectDir -LockObject $newLock -ProfileName $activeProfile -StateDir $StateDir -DevKitRoot $DevKitRoot
+            Save-DevKitLock -ProjectDir $ProjectDir -LockObject $newLock -ProfileName $activeProfile -StateDir $StateDir -DevKitRoot $DevKitRoot -StateScope $StateScope
 
             if (-not $NoGitExclude) {
                 $excludePaths = Get-DevKitProfileExcludePaths -Manifest $Manifest -ProfileName $activeProfile -DevKitRoot $DevKitRoot
@@ -2216,6 +2571,15 @@ function Invoke-DevKitSync {
         }
     }
     finally {
+        if ($null -ne $guardStream) {
+            $guardStream.Close()
+            $guardStream.Dispose()
+            $guardStream = $null
+        }
+        if ($guardAcquired -and $null -ne $guardFile -and (Test-Path $guardFile)) {
+            Remove-Item -LiteralPath $guardFile -Force -ErrorAction SilentlyContinue
+        }
+
         # Always clean up any temporary directories used during fetch
         $cleanedBases = @{}
         foreach ($item in $state) {
@@ -2255,8 +2619,20 @@ function Invoke-DevKitVerify {
         [psobject]$Manifest = $null,
 
         [Parameter(Mandatory = $true)]
-        [string]$DevKitRoot
+        [string]$DevKitRoot,
+
+        [Parameter(Mandatory = $false)]
+        [string]$StateScope = $null
     )
+
+    if ($StateScope) {
+        if ($StateScope -ne "checkout") {
+            throw "Unsupported state scope"
+        }
+        if (-not $Profile) {
+            throw "Checkout state requires -Profile"
+        }
+    }
 
     if ($null -eq $Manifest) {
         if (-not [string]::IsNullOrWhiteSpace($Profile)) {
@@ -2270,13 +2646,13 @@ function Invoke-DevKitVerify {
     }
 
     $activeProfile = if (-not [string]::IsNullOrWhiteSpace($Profile)) { $Profile } else { $Manifest.profile }
-    $lock = Get-DevKitLock -ProjectDir $ProjectDir -ProfileName $activeProfile -StateDir $StateDir -DevKitRoot $DevKitRoot
+    $lock = Get-DevKitLock -ProjectDir $ProjectDir -ProfileName $activeProfile -StateDir $StateDir -DevKitRoot $DevKitRoot -StateScope $StateScope
     $state = Test-DevKitProjectState -ProjectDir $ProjectDir -Manifest $Manifest -Lock $lock -DevKitRoot $DevKitRoot
 
     $discrepancies = $state | Where-Object { $_.Status -ne "synced" }
 
     return [PSCustomObject]@{
-        Verified      = ($discrepancies.Count -eq 0)
+        Verified      = ($discrepancies.Count -eq 0 -and $null -ne $lock)
         TotalFiles    = $state.Count
         Discrepancies = $discrepancies
         State         = $state
@@ -2285,6 +2661,11 @@ function Invoke-DevKitVerify {
 
 Export-ModuleMember -Function `
     Get-DevKitSha256, `
+    Test-DevKitSamePath, `
+    Get-DevKitOriginRepository, `
+    Get-DevKitMachineId, `
+    Get-DevKitFileStamp, `
+    Get-DevKitCheckoutIdentity, `
     Test-DevKitSafeTargetPath, `
     Resolve-DevKitComponent, `
     Resolve-DevKitFileComponent, `

@@ -1,0 +1,26 @@
+# Minimal Git line-ending policy for agent-devkit
+# Preserves LF endings on code and documentation to guarantee SHA-256 integrity across Windows and Linux.
+*.md text eol=lf
+*.json text eol=lf
+*.mjs text eol=lf
+*.js text eol=lf
+*.ps1 text eol=lf
+*.psm1 text eol=lf
+*.txt text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.sh text eol=lf
+
+# Explicit binary preservation to prevent any heuristic line-ending conversion
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.bin binary
+*.zip binary
+*.tar.gz binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary

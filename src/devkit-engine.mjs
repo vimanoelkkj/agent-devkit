@@ -101,9 +101,44 @@ function originRepository(projectDir) {
   if (!match) fail('Origin must be an exact GitHub HTTPS or SSH repository URL');
   return match[1].toLowerCase();
 }
+export function samePath(a, b, platform = process.platform) {
+  if (a === b) return true;
+  if (platform === 'win32') {
+    return path.win32.resolve(a).toLowerCase() === path.win32.resolve(b).toLowerCase();
+  }
+  return false;
+}
+
+export function getMachineIdentity({ platform = process.platform, winRegReader = null, linuxReader = null } = {}) {
+  if (platform === 'win32') {
+    let output = '';
+    try {
+      if (winRegReader) {
+        output = winRegReader();
+      } else {
+        const regExe = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'reg.exe') : 'reg';
+        output = execFileSync(regExe, ['query', 'HKLM\\SOFTWARE\\Microsoft\\Cryptography', '/v', 'MachineGuid'], {
+          encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+        });
+      }
+    } catch {
+      fail('Failed to query Windows MachineGuid for checkout state');
+    }
+    const match = typeof output === 'string' && output.match(/MachineGuid\s+REG_SZ\s+([a-f0-9-]+)/i);
+    if (!match || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(match[1])) {
+      fail('A valid Windows MachineGuid is required for checkout state');
+    }
+    return hash(match[1].toLowerCase());
+  }
+  const bytes = linuxReader ? linuxReader() : read('/etc/machine-id');
+  const machine = bytes?.toString('utf8').trim();
+  if (!machine || !/^[a-f0-9]{32}$/i.test(machine)) fail('A valid Linux machine-id is required for checkout state');
+  return hash(machine);
+}
+
 // Checkout state is opt-in. Binding metadata travels with the 1.0.0 lock so
 // copying a foreign lock into a namespace fails closed instead of adopting it.
-function checkoutIdentity(projectDir) {
+export function checkoutIdentity(projectDir, options = {}) {
   const dotGit = path.join(projectDir, '.git');
   safe(dotGit, stat(dotGit)?.isDirectory() ? 'directory' : 'file');
   if (!stat(dotGit)) fail('Checkout state requires a Git checkout root');
@@ -115,17 +150,16 @@ function checkoutIdentity(projectDir) {
     { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] }).trimEnd().split('\n');
   if (values.length !== 3) fail('Invalid Git checkout identity');
   const [top, gitDir, commonDir] = values.map(value => fs.realpathSync(safe(value, 'directory')));
-  if (top !== projectDir) fail('Project directory must be the Git checkout root');
+  if (!samePath(top, projectDir, options.platform)) fail('Project directory must be the Git checkout root');
   for (const dir of new Set([gitDir, commonDir])) {
     for (const file of ['config', 'config.worktree', 'commondir', 'gitdir']) safe(path.join(dir, file));
   }
-  const machine = read('/etc/machine-id')?.toString('utf8').trim();
-  if (!machine || !/^[a-f0-9]{32}$/i.test(machine)) fail('A valid Linux machine-id is required for checkout state');
+  const machine = getMachineIdentity(options);
   const stamp = dir => {
     const s = fs.statSync(dir, { bigint: true });
     return { device: String(s.dev), inode: String(s.ino) };
   };
-  const identity = { version: 1, machine: hash(machine), projectDir: top, gitDir, commonDir,
+  const identity = { version: 1, machine, projectDir: top, gitDir, commonDir,
     project: stamp(top), git: stamp(gitDir), origin: originRepository(projectDir) };
   return { identity, id: hash(json(identity)) };
 }

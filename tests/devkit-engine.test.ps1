@@ -248,12 +248,20 @@ try {
     $junctionTarget = Join-Path $fixtureBase "junction-pkg"
     New-Item -ItemType Directory -Path $junctionSource -Force | Out-Null
     Set-Content -Path (Join-Path $junctionSource "file.md") -Value "data"
-    $mklinkOutput = cmd /c "mklink /J `"$junctionTarget`" `"$junctionSource`"" 2>&1
-    if (Test-Path $junctionTarget) {
-        Assert-Throws { Test-DevKitPackageSecurity -Path $junctionTarget -Policy "data-only" } "Symlink or reparse point detected" "Rejects directory junction / reparse point"
-        cmd /c "rmdir `"$junctionTarget`"" 2>&1 | Out-Null
+    if ($IsWindows -or ($env:OS -like "*Windows*")) {
+        $mklinkOutput = cmd /c "mklink /J `"$junctionTarget`" `"$junctionSource`"" 2>&1
+        if (Test-Path $junctionTarget) {
+            Assert-Throws { Test-DevKitPackageSecurity -Path $junctionTarget -Policy "data-only" } "Symlink or reparse point detected" "Rejects directory junction / reparse point"
+            cmd /c "rmdir `"$junctionTarget`"" 2>&1 | Out-Null
+        } else {
+            Write-Host "  SKIP: mklink not supported in current environment permissions" -ForegroundColor DarkGray
+        }
     } else {
-        Write-Host "  SKIP: mklink not supported in current environment permissions" -ForegroundColor DarkGray
+        [System.IO.File]::CreateSymbolicLink($junctionTarget, $junctionSource) | Out-Null
+        if (Test-Path $junctionTarget) {
+            Assert-Throws { Test-DevKitPackageSecurity -Path $junctionTarget -Policy "data-only" } "Symlink or reparse point detected" "Rejects symlink / reparse point"
+            Remove-Item -LiteralPath $junctionTarget -Force -ErrorAction SilentlyContinue
+        }
     }
 
     # 9.5 Path traversal in declared subpath
