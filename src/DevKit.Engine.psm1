@@ -356,9 +356,10 @@ function Resolve-DevKitComponent {
 
     $files = @{}
     $allFiles = Get-ChildItem -Path $resolvedDir -Recurse -File
-    $resolvedDirPrefix = $resolvedDir.TrimEnd('\', '/')
+    $canonDir = (Resolve-DevKitCanonicalPath -Path $resolvedDir).TrimEnd('\', '/')
     foreach ($file in $allFiles) {
-        $relPath = $file.FullName.Substring($resolvedDirPrefix.Length).TrimStart('\', '/').Replace('\', '/')
+        $canonFile = (Resolve-DevKitCanonicalPath -Path $file.FullName)
+        $relPath = [System.IO.Path]::GetRelativePath($canonDir, $canonFile).Replace('\', '/')
         $hash = Get-DevKitSha256 -Path $file.FullName
         $files[$relPath] = @{
             sha256 = $hash
@@ -1364,10 +1365,11 @@ function Fetch-DevKitThirdParty {
         # 9. Compute SHA-256 for all approved files
         $files = @{}
         $subpathFiles = Get-ChildItem -Path $resolvedSubpath -Recurse -File
-        $subpathPrefix = $resolvedSubpath.TrimEnd('\', '/')
+        $canonSubpath = (Resolve-DevKitCanonicalPath -Path $resolvedSubpath).TrimEnd('\', '/')
 
         foreach ($file in $subpathFiles) {
-            $relPath = $file.FullName.Substring($subpathPrefix.Length).TrimStart('\', '/').Replace('\', '/')
+            $canonFile = (Resolve-DevKitCanonicalPath -Path $file.FullName)
+            $relPath = [System.IO.Path]::GetRelativePath($canonSubpath, $canonFile).Replace('\', '/')
             $hash = Get-DevKitSha256 -Path $file.FullName
             $files[$relPath] = @{
                 sha256     = $hash
