@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -6,7 +7,35 @@ import { execFileSync } from 'node:child_process';
 import { checkoutIdentity, plan, sync, verify } from '../src/devkit-engine.mjs';
 
 const devkitRoot = path.resolve(import.meta.dirname, '..');
-const choppDir = '/home/zzzzz/dev/chopp-delivery';
+const defaultChoppDir = process.env.TEST_OVERRIDE_CHOPP_DIR || '/home/zzzzz/dev/chopp-delivery';
+
+let dynamicChoppDir = null;
+function getChoppDir() {
+  if (fs.existsSync(defaultChoppDir)) {
+    return defaultChoppDir;
+  }
+  if (!dynamicChoppDir) {
+    dynamicChoppDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chopp-delivery-ci-'));
+    execFileSync('git', ['init', '--quiet', dynamicChoppDir]);
+    execFileSync('git', ['-C', dynamicChoppDir, 'config', '--local', 'remote.origin.url', 'https://github.com/vimanoelkkj/chopp-delivery.git']);
+    fs.writeFileSync(path.join(dynamicChoppDir, 'package.json'), '{}');
+    sync({
+      devkitRoot,
+      projectDir: dynamicChoppDir,
+      profile: 'chopp-delivery',
+      stateScope: 'checkout'
+    });
+  }
+  return dynamicChoppDir;
+}
+
+process.on('exit', () => {
+  if (dynamicChoppDir) {
+    try {
+      fs.rmSync(dynamicChoppDir, { recursive: true, force: true });
+    } catch {}
+  }
+});
 
 function runPwsh(cmd) {
   const result = execFileSync('pwsh', ['-NoProfile', '-Command', cmd], {
@@ -17,10 +46,13 @@ function runPwsh(cmd) {
 }
 
 test('Cross-engine checkout identity: exact byte-for-byte equivalence on Chopp Delivery', () => {
-  const nodeCheckout = checkoutIdentity(choppDir);
+  const targetDir = getChoppDir();
+  const nodeCheckout = checkoutIdentity(targetDir);
+  const pwshTargetDir = targetDir.replace(/\\/g, '/');
+  const pwshDevkitRoot = devkitRoot.replace(/\\/g, '/');
   const pwshScript = `
-    Import-Module "${path.join(devkitRoot, 'src/DevKit.Engine.psm1')}" -Force -DisableNameChecking
-    $c = Get-DevKitCheckoutIdentity -ProjectDir "${choppDir}"
+    Import-Module "${pwshDevkitRoot}/src/DevKit.Engine.psm1" -Force -DisableNameChecking
+    $c = Get-DevKitCheckoutIdentity -ProjectDir "${pwshTargetDir}"
     $c | ConvertTo-Json -Depth 5 -Compress
   `;
   const pwshOut = runPwsh(pwshScript);
@@ -40,9 +72,10 @@ test('Cross-engine checkout identity: exact byte-for-byte equivalence on Chopp D
 });
 
 test('Cross-engine verify: both engines verify Chopp Delivery with 100% equivalence', () => {
+  const targetDir = getChoppDir();
   const nodeResult = verify({
     devkitRoot,
-    projectDir: choppDir,
+    projectDir: targetDir,
     profile: 'chopp-delivery',
     stateScope: 'checkout'
   });
@@ -50,9 +83,11 @@ test('Cross-engine verify: both engines verify Chopp Delivery with 100% equivale
   assert.equal(nodeResult.state.length, 8);
   assert.ok(nodeResult.state.every(s => s.status === 'synced'));
 
+  const pwshTargetDir = targetDir.replace(/\\/g, '/');
+  const pwshDevkitRoot = devkitRoot.replace(/\\/g, '/');
   const pwshScript = `
-    Import-Module "${path.join(devkitRoot, 'src/DevKit.Engine.psm1')}" -Force -DisableNameChecking
-    $v = Invoke-DevKitVerify -ProjectDir "${choppDir}" -Profile chopp-delivery -DevKitRoot "${devkitRoot}" -StateScope checkout
+    Import-Module "${pwshDevkitRoot}/src/DevKit.Engine.psm1" -Force -DisableNameChecking
+    $v = Invoke-DevKitVerify -ProjectDir "${pwshTargetDir}" -Profile chopp-delivery -DevKitRoot "${pwshDevkitRoot}" -StateScope checkout
     [PSCustomObject]@{
       Verified = $v.Verified
       TotalFiles = $v.TotalFiles
@@ -68,11 +103,12 @@ test('Cross-engine verify: both engines verify Chopp Delivery with 100% equivale
 });
 
 test('Cross-engine CLI: both Node and PowerShell CLIs verify Chopp Delivery with exit code 0', () => {
+  const targetDir = getChoppDir();
   const nodeCli = execFileSync(process.execPath, [
     path.join(devkitRoot, 'bin/agent-devkit.mjs'),
     'verify',
     '--profile', 'chopp-delivery',
-    '--project-dir', choppDir,
+    '--project-dir', targetDir,
     '--state-scope', 'checkout'
   ], { encoding: 'utf8' });
   const nodeParsed = JSON.parse(nodeCli);
@@ -84,14 +120,14 @@ test('Cross-engine CLI: both Node and PowerShell CLIs verify Chopp Delivery with
     path.join(devkitRoot, 'bin/agent-devkit.ps1'),
     'verify',
     '-Profile', 'chopp-delivery',
-    '-ProjectDir', choppDir,
+    '-ProjectDir', targetDir,
     '-StateScope', 'checkout'
   ], { encoding: 'utf8' });
   assert.ok(pwshCli.includes('SUCCESS: All managed components are strictly synchronized.'));
 });
 
 test('Fail-closed: foreign binding mismatch diagnosis across both engines', t => {
-  const sandbox = fs.mkdtempSync('/tmp/cross-engine-fail-');
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-engine-fail-'));
   t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
   execFileSync('git', ['init', '--quiet', sandbox]);
@@ -134,10 +170,13 @@ test('Fail-closed: foreign binding mismatch diagnosis across both engines', t =>
   );
 
   // PowerShell engine fails closed with exact message
+  const pwshSandbox = sandbox.replace(/\\/g, '/');
+  const pwshDevkitRoot = devkitRoot.replace(/\\/g, '/');
+  const pwshMockDevKit = mockDevKit.replace(/\\/g, '/');
   const pwshScript = `
-    Import-Module "${path.join(devkitRoot, 'src/DevKit.Engine.psm1')}" -Force -DisableNameChecking
+    Import-Module "${pwshDevkitRoot}/src/DevKit.Engine.psm1" -Force -DisableNameChecking
     try {
-      Get-DevKitLock -ProjectDir "${sandbox}" -ProfileName "chopp-delivery" -DevKitRoot "${mockDevKit}" -StateScope "checkout"
+      Get-DevKitLock -ProjectDir "${pwshSandbox}" -ProfileName "chopp-delivery" -DevKitRoot "${pwshMockDevKit}" -StateScope "checkout"
       Write-Output "DID_NOT_THROW"
     } catch {
       Write-Output "THREW: $($_.Exception.Message)"
@@ -148,7 +187,7 @@ test('Fail-closed: foreign binding mismatch diagnosis across both engines', t =>
 });
 
 test('Fail-closed: missing checkoutState fails closed across both engines', t => {
-  const sandbox = fs.mkdtempSync('/tmp/cross-engine-missing-');
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-engine-missing-'));
   t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
   execFileSync('git', ['init', '--quiet', sandbox]);
@@ -186,10 +225,13 @@ test('Fail-closed: missing checkoutState fails closed across both engines', t =>
   );
 
   // PowerShell engine fails closed
+  const pwshSandbox = sandbox.replace(/\\/g, '/');
+  const pwshDevkitRoot = devkitRoot.replace(/\\/g, '/');
+  const pwshMockDevKit = mockDevKit.replace(/\\/g, '/');
   const pwshScript = `
-    Import-Module "${path.join(devkitRoot, 'src/DevKit.Engine.psm1')}" -Force -DisableNameChecking
+    Import-Module "${pwshDevkitRoot}/src/DevKit.Engine.psm1" -Force -DisableNameChecking
     try {
-      Get-DevKitLock -ProjectDir "${sandbox}" -ProfileName "chopp-delivery" -DevKitRoot "${mockDevKit}" -StateScope "checkout"
+      Get-DevKitLock -ProjectDir "${pwshSandbox}" -ProfileName "chopp-delivery" -DevKitRoot "${pwshMockDevKit}" -StateScope "checkout"
       Write-Output "DID_NOT_THROW"
     } catch {
       Write-Output "THREW: $($_.Exception.Message)"
@@ -200,7 +242,7 @@ test('Fail-closed: missing checkoutState fails closed across both engines', t =>
 });
 
 test('Fail-closed: legacy scope rejects lock containing checkoutState across both engines', t => {
-  const sandbox = fs.mkdtempSync('/tmp/cross-engine-legacy-');
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-engine-legacy-'));
   t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
   execFileSync('git', ['init', '--quiet', sandbox]);
@@ -237,10 +279,13 @@ test('Fail-closed: legacy scope rejects lock containing checkoutState across bot
   );
 
   // PowerShell engine rejects
+  const pwshSandbox = sandbox.replace(/\\/g, '/');
+  const pwshDevkitRoot = devkitRoot.replace(/\\/g, '/');
+  const pwshMockDevKit = mockDevKit.replace(/\\/g, '/');
   const pwshScript = `
-    Import-Module "${path.join(devkitRoot, 'src/DevKit.Engine.psm1')}" -Force -DisableNameChecking
+    Import-Module "${pwshDevkitRoot}/src/DevKit.Engine.psm1" -Force -DisableNameChecking
     try {
-      Get-DevKitLock -ProjectDir "${sandbox}" -ProfileName "chopp-delivery" -DevKitRoot "${mockDevKit}"
+      Get-DevKitLock -ProjectDir "${pwshSandbox}" -ProfileName "chopp-delivery" -DevKitRoot "${pwshMockDevKit}"
       Write-Output "DID_NOT_THROW"
     } catch {
       Write-Output "THREW: $($_.Exception.Message)"
@@ -251,7 +296,7 @@ test('Fail-closed: legacy scope rejects lock containing checkoutState across bot
 });
 
 test('Sync guard: legacy .agent-devkit-sync guard blocks checkout sync in both engines', t => {
-  const sandbox = fs.mkdtempSync('/tmp/cross-engine-guard-');
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-engine-guard-'));
   t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
   execFileSync('git', ['init', '--quiet', sandbox]);
@@ -266,10 +311,12 @@ test('Sync guard: legacy .agent-devkit-sync guard blocks checkout sync in both e
   );
 
   // PowerShell engine fails
+  const pwshSandbox = sandbox.replace(/\\/g, '/');
+  const pwshDevkitRoot = devkitRoot.replace(/\\/g, '/');
   const pwshScript = `
-    Import-Module "${path.join(devkitRoot, 'src/DevKit.Engine.psm1')}" -Force -DisableNameChecking
+    Import-Module "${pwshDevkitRoot}/src/DevKit.Engine.psm1" -Force -DisableNameChecking
     try {
-      Invoke-DevKitSync -ProjectDir "${sandbox}" -Profile "chopp-delivery" -DevKitRoot "${devkitRoot}" -StateScope "checkout"
+      Invoke-DevKitSync -ProjectDir "${pwshSandbox}" -Profile "chopp-delivery" -DevKitRoot "${pwshDevkitRoot}" -StateScope "checkout"
       Write-Output "DID_NOT_THROW"
     } catch {
       Write-Output "THREW: $($_.Exception.Message)"
@@ -280,7 +327,7 @@ test('Sync guard: legacy .agent-devkit-sync guard blocks checkout sync in both e
 });
 
 test('Mutual interop: Node sync creates lockfile -> PowerShell verify validates cleanly', t => {
-  const sandbox = fs.mkdtempSync('/tmp/cross-engine-node2ps-');
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-engine-node2ps-'));
   t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
   execFileSync('git', ['init', '--quiet', sandbox]);
@@ -301,9 +348,12 @@ test('Mutual interop: Node sync creates lockfile -> PowerShell verify validates 
   assert.equal(syncResult.blocked, false);
   assert.equal(syncResult.written, 8);
 
+  const pwshSandbox = sandbox.replace(/\\/g, '/');
+  const pwshDevkitRoot = devkitRoot.replace(/\\/g, '/');
+  const pwshMockDevKit = mockDevKit.replace(/\\/g, '/');
   const pwshScript = `
-    Import-Module "${path.join(devkitRoot, 'src/DevKit.Engine.psm1')}" -Force -DisableNameChecking
-    $v = Invoke-DevKitVerify -ProjectDir "${sandbox}" -Profile chopp-delivery -DevKitRoot "${mockDevKit}" -StateScope checkout
+    Import-Module "${pwshDevkitRoot}/src/DevKit.Engine.psm1" -Force -DisableNameChecking
+    $v = Invoke-DevKitVerify -ProjectDir "${pwshSandbox}" -Profile chopp-delivery -DevKitRoot "${pwshMockDevKit}" -StateScope checkout
     [PSCustomObject]@{
       Verified = $v.Verified
       TotalFiles = $v.TotalFiles
@@ -318,7 +368,7 @@ test('Mutual interop: Node sync creates lockfile -> PowerShell verify validates 
 });
 
 test('Mutual interop: PowerShell sync creates lockfile -> Node verify validates cleanly', t => {
-  const sandbox = fs.mkdtempSync('/tmp/cross-engine-ps2node-');
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-engine-ps2node-'));
   t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
   execFileSync('git', ['init', '--quiet', sandbox]);
@@ -330,9 +380,12 @@ test('Mutual interop: PowerShell sync creates lockfile -> Node verify validates 
   fs.cpSync(path.join(devkitRoot, 'profiles'), path.join(mockDevKit, 'profiles'), { recursive: true });
   fs.cpSync(path.join(devkitRoot, 'core'), path.join(mockDevKit, 'core'), { recursive: true });
 
+  const pwshSandbox = sandbox.replace(/\\/g, '/');
+  const pwshDevkitRoot = devkitRoot.replace(/\\/g, '/');
+  const pwshMockDevKit = mockDevKit.replace(/\\/g, '/');
   const pwshScript = `
-    Import-Module "${path.join(devkitRoot, 'src/DevKit.Engine.psm1')}" -Force -DisableNameChecking
-    $s = Invoke-DevKitSync -ProjectDir "${sandbox}" -Profile chopp-delivery -DevKitRoot "${mockDevKit}" -StateScope checkout
+    Import-Module "${pwshDevkitRoot}/src/DevKit.Engine.psm1" -Force -DisableNameChecking
+    $s = Invoke-DevKitSync -ProjectDir "${pwshSandbox}" -Profile chopp-delivery -DevKitRoot "${pwshMockDevKit}" -StateScope checkout
     [PSCustomObject]@{
       Blocked = $s.Blocked
       Materialized = $s.Materialized
@@ -355,7 +408,7 @@ test('Mutual interop: PowerShell sync creates lockfile -> Node verify validates 
 });
 
 test('Concurrent guard: active checkout sync guard blocks both engines and is preserved on failure', t => {
-  const sandbox = fs.mkdtempSync('/tmp/cross-engine-concurrent-');
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-engine-concurrent-'));
   t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
   execFileSync('git', ['init', '--quiet', sandbox]);
@@ -381,10 +434,13 @@ test('Concurrent guard: active checkout sync guard blocks both engines and is pr
   assert.equal(fs.existsSync(guardPath), true);
 
   // 2. PowerShell engine attempt must fail
+  const pwshSandbox = sandbox.replace(/\\/g, '/');
+  const pwshDevkitRoot = devkitRoot.replace(/\\/g, '/');
+  const pwshMockDevKit = mockDevKit.replace(/\\/g, '/');
   const pwshScript = `
-    Import-Module "${path.join(devkitRoot, 'src/DevKit.Engine.psm1')}" -Force -DisableNameChecking
+    Import-Module "${pwshDevkitRoot}/src/DevKit.Engine.psm1" -Force -DisableNameChecking
     try {
-      Invoke-DevKitSync -ProjectDir "${sandbox}" -Profile "chopp-delivery" -DevKitRoot "${mockDevKit}" -StateScope "checkout"
+      Invoke-DevKitSync -ProjectDir "${pwshSandbox}" -Profile "chopp-delivery" -DevKitRoot "${pwshMockDevKit}" -StateScope "checkout"
       Write-Output "DID_NOT_THROW"
     } catch {
       Write-Output "THREW: $($_.Exception.GetBaseException().GetType().Name)"

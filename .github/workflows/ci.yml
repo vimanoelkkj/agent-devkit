@@ -1,0 +1,115 @@
+name: CI Multiplataforma (Linux & Windows)
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Documentação e limites do ambiente de execução:
+        # - ubuntu-latest: Ubuntu Linux x64 nativo.
+        # - windows-latest: Windows Server (2022/2025 Datacenter x64).
+        #   AVISO DE ESCOPO: O runner do GitHub Actions utiliza Windows Server e representa uma
+        #   aproximação funcional do Windows 11 para semântica de kernel NT, registro (MachineGuid),
+        #   sistema de arquivos NTFS (reparse points, junções, normalização de unidades C:) e
+        #   PowerShell 7. Não constitui uma certificação formal da edição Desktop do Windows 11.
+        os: [ubuntu-latest, windows-latest]
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Configure Git checkout CRLF policy
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Verify Git EOL policy resilience (.gitattributes)
+        run: |
+          # 1. Simular ambiente hostil (core.autocrlf=true) típico de instalações Windows padrão
+          git config --global core.autocrlf true
+
+          # 2. Exigir estritamente que TODOS os arquivos alvo declarem eol=lf via .gitattributes
+          $targetFiles = @(
+            'core/skills/targeted-repo-search/SKILL.md',
+            'profiles/chopp-delivery/profile.json',
+            'src/devkit-engine.mjs'
+          )
+          foreach ($file in $targetFiles) {
+            $attrs = git check-attr -a $file
+            $attrs | ForEach-Object { Write-Host "$file -> $_" }
+            $eolAttr = ($attrs | Select-String -Pattern '^[^:]+:\s*eol:\s*lf$')
+            if (-not $eolAttr) {
+              throw "File '$file' failed .gitattributes policy: missing 'eol: lf'"
+            }
+          }
+          Write-Host "Verified all $($targetFiles.Count) target files strictly enforce eol=lf regardless of core.autocrlf."
+
+          # 3. Restaurar configuração recomendada
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Validate Windows-specific platform environment
+        if: runner.os == 'Windows'
+        run: |
+          # 1. Consulta ao MachineGuid do registro sem privilégios administrativos
+          $regGuid = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid -ErrorAction Stop).MachineGuid
+          if (-not $regGuid) {
+            throw "Failed to query MachineGuid from HKLM:\SOFTWARE\Microsoft\Cryptography"
+          }
+          $masked = $regGuid.Substring(0, 8) + '...'
+          Write-Host "MachineGuid query verified without elevation: $masked"
+
+          # 2. Criação, detecção e limpeza segura de junções NTFS (reparse points)
+          $testSource = Join-Path ([System.IO.Path]::GetTempPath()) "ntfs-junc-src-$([Guid]::NewGuid())"
+          $testTarget = Join-Path ([System.IO.Path]::GetTempPath()) "ntfs-junc-dst-$([Guid]::NewGuid())"
+          New-Item -ItemType Directory -Path $testSource -Force | Out-Null
+          try {
+            $mklinkOut = cmd /c "mklink /J `"$testTarget`" `"$testSource`" 2>&1"
+            if (-not (Test-Path $testTarget)) {
+              throw "Failed to create test NTFS junction: $mklinkOut"
+            }
+            Write-Host "NTFS junction creation and detection verified."
+          } finally {
+            if (Test-Path $testTarget) {
+              cmd /c "rmdir `"$testTarget`"" 2>&1 | Out-Null
+            }
+            if (Test-Path $testSource) {
+              Remove-Item -LiteralPath $testSource -Force -Recurse -ErrorAction SilentlyContinue
+            }
+          }
+
+      - name: Run Node.js Cross-Platform Test Suite (187 tests)
+        run: |
+          node --test tests/devkit-linux.test.mjs tests/devkit-linux-resources.test.mjs tests/devkit-checkout-state.test.mjs tests/cross-platform-p0.test.mjs tests/cross-engine-checkout.test.mjs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Node.js test suite failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Run PowerShell Cross-Platform Test Suite (238 assertions)
+        run: |
+          pwsh tests/devkit-engine.test.ps1
+          if ($LASTEXITCODE -ne 0) {
+            throw "PowerShell test suite failed with exit code $LASTEXITCODE"
+          }

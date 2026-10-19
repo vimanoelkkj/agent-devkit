@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import os from 'node:os';
 import { getMachineIdentity, samePath, checkoutIdentity } from '../src/devkit-engine.mjs';
 
 const hash = data => createHash('sha256').update(data).digest('hex');
@@ -110,7 +111,7 @@ test('samePath: strict on Linux and tolerant of drive letters and slashes on Win
 });
 
 test('checkoutIdentity: Windows 11 simulated checkout produces valid identity', t => {
-  const base = fs.mkdtempSync('/tmp/cross-platform-test-');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-platform-test-'));
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
 
   execFileSync('git', ['init', '--quiet', base]);
