@@ -655,6 +655,36 @@ try {
         Test-DevKitSafeTargetPath -ProjectDir $sandboxPhaseA2 -RelativeTarget "sub/../../escape.txt"
     } "Path traversal detected" "Rejects nested path traversal escaping project dir"
 
+    # Sibling directory adversarial tests (e.g. chopp vs chopp-backup)
+    $siblingName = "$([System.IO.Path]::GetFileName($sandboxPhaseA2))-backup"
+    $siblingPath = Join-Path ([System.IO.Path]::GetDirectoryName($sandboxPhaseA2)) $siblingName
+    New-Item -ItemType Directory -Path $siblingPath -Force | Out-Null
+    try {
+        Assert-Throws {
+            Test-DevKitSafeTargetPath -ProjectDir $sandboxPhaseA2 -RelativeTarget "../$siblingName/evil.txt"
+        } "Path traversal detected" "Rejects path traversal to sibling directory with matching prefix"
+
+        Assert-Throws {
+            Test-DevKitSafeTargetPath -ProjectDir $sandboxPhaseA2 -RelativeTarget "..\$siblingName\evil.txt"
+        } "Path traversal detected" "Rejects Windows backslash traversal to sibling directory"
+
+        Assert-Throws {
+            Test-DevKitSafeTargetPath -ProjectDir $sandboxPhaseA2 -RelativeTarget "$siblingPath/evil.txt"
+        } "Path traversal detected" "Rejects absolute path to sibling directory"
+
+        Assert-Throws {
+            Test-DevKitSafeTargetPath -ProjectDir $sandboxPhaseA2 -RelativeTarget "C:\evil.txt"
+        } "Path traversal detected" "Rejects drive-rooted path target"
+
+        Assert-Throws {
+            Test-DevKitSafeTargetPath -ProjectDir $sandboxPhaseA2 -RelativeTarget "\\server\share\evil.txt"
+        } "Path traversal detected" "Rejects UNC target path"
+
+        Assert-Equal (Test-DevKitSamePath $sandboxPhaseA2 $siblingPath) $false "Test-DevKitSamePath differentiates sibling directories with prefix collision"
+    } finally {
+        Remove-Item -Path $siblingPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     # 14.12 Custom overlays & profile isolation test
     $isoProfileDir = Join-Path $devKitRoot "profiles\test-isolation-profile"
     New-Item -ItemType Directory -Path (Join-Path $isoProfileDir "overlays") -Force | Out-Null

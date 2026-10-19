@@ -36,13 +36,16 @@ function Test-DevKitSamePath {
         [string]$PathB
     )
 
-    if ($PathA -eq $PathB) { return $true }
+    if ($PathA -eq $PathB -or $PathA.TrimEnd('\', '/') -eq $PathB.TrimEnd('\', '/')) { return $true }
+    $realA = try { (Resolve-Path -LiteralPath $PathA -ErrorAction Stop).ProviderPath } catch { [System.IO.Path]::GetFullPath($PathA) }
+    $realB = try { (Resolve-Path -LiteralPath $PathB -ErrorAction Stop).ProviderPath } catch { [System.IO.Path]::GetFullPath($PathB) }
+    $fullA = $realA.TrimEnd('\', '/')
+    $fullB = $realB.TrimEnd('\', '/')
     if ($IsWindows -or ($env:OS -like "*Windows*")) {
-        $fullA = [System.IO.Path]::GetFullPath($PathA).TrimEnd('\', '/')
-        $fullB = [System.IO.Path]::GetFullPath($PathB).TrimEnd('\', '/')
         return $fullA.ToLowerInvariant() -eq $fullB.ToLowerInvariant()
+    } else {
+        return $fullA -eq $fullB
     }
-    return $false
 }
 
 function Get-DevKitOriginRepository {
@@ -185,9 +188,9 @@ function Get-DevKitCheckoutIdentity {
         }
     }
 
-    $top = if (-not ($IsWindows -or ($env:OS -like "*Windows*"))) { (& realpath $topRaw 2>$null).Trim() } else { [System.IO.Path]::GetFullPath((Resolve-Path $topRaw).Path) }
-    $gitDir = if (-not ($IsWindows -or ($env:OS -like "*Windows*"))) { (& realpath $gitDirRaw 2>$null).Trim() } else { [System.IO.Path]::GetFullPath((Resolve-Path $gitDirRaw).Path) }
-    $commonDir = if (-not ($IsWindows -or ($env:OS -like "*Windows*"))) { (& realpath $commonDirRaw 2>$null).Trim() } else { [System.IO.Path]::GetFullPath((Resolve-Path $commonDirRaw).Path) }
+    $top = if (-not ($IsWindows -or ($env:OS -like "*Windows*"))) { (& realpath $topRaw 2>$null).Trim() } else { (Resolve-Path -LiteralPath $topRaw).ProviderPath }
+    $gitDir = if (-not ($IsWindows -or ($env:OS -like "*Windows*"))) { (& realpath $gitDirRaw 2>$null).Trim() } else { (Resolve-Path -LiteralPath $gitDirRaw).ProviderPath }
+    $commonDir = if (-not ($IsWindows -or ($env:OS -like "*Windows*"))) { (& realpath $commonDirRaw 2>$null).Trim() } else { (Resolve-Path -LiteralPath $commonDirRaw).ProviderPath }
 
     if (-not (Test-DevKitSamePath $top $ProjectDir)) {
         throw "Project directory must be the Git checkout root"
@@ -297,11 +300,69 @@ function Test-DevKitSafeTargetPath {
         [string]$RelativeTarget
     )
 
-    $resolvedProject = (Resolve-Path $ProjectDir).Path.TrimEnd('\', '/')
-    $combined = [System.IO.Path]::GetFullPath((Join-Path $resolvedProject $RelativeTarget.Replace('/', [System.IO.Path]::DirectorySeparatorChar)))
-    if (-not $combined.StartsWith($resolvedProject + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -and $combined -ne $resolvedProject) {
+    if ([string]::IsNullOrWhiteSpace($RelativeTarget)) {
+        throw "Path traversal detected: target path cannot be empty."
+    }
+
+    $sep = [System.IO.Path]::DirectorySeparatorChar
+    $normRel = $RelativeTarget.Replace('\', '/')
+
+    # Disallow null-bytes, colons (drive letters or NTFS streams), UNC prefixes
+    if ($RelativeTarget.Contains("`0") -or $RelativeTarget.Contains(":") -or $normRel.StartsWith("//") -or $RelativeTarget.StartsWith("\\")) {
+        throw "Path traversal detected: target '$RelativeTarget' contains invalid characters or prefixes."
+    }
+
+    # Disallow rooted / absolute paths
+    if ($normRel.StartsWith("/") -or [System.IO.Path]::IsPathRooted($RelativeTarget)) {
+        throw "Path traversal detected: target '$RelativeTarget' is rooted or escapes project root '$ProjectDir'."
+    }
+
+    # Disallow path navigation segments
+    $segments = $normRel.Split('/')
+    if ($segments | Where-Object { $_ -eq '..' -or $_ -eq '.' }) {
+        throw "Path traversal detected: target '$RelativeTarget' contains invalid navigation segments."
+    }
+
+    $resolvedProject = try {
+        (Resolve-Path -LiteralPath $ProjectDir -ErrorAction Stop).ProviderPath.TrimEnd('\', '/')
+    } catch {
+        [System.IO.Path]::GetFullPath($ProjectDir).TrimEnd('\', '/')
+    }
+
+    $cleanRel = $normRel.Replace('/', $sep)
+    $combined = [System.IO.Path]::GetFullPath((Join-Path $resolvedProject $cleanRel))
+
+    $canonProject = try {
+        (Resolve-Path -LiteralPath $resolvedProject -ErrorAction Stop).ProviderPath.TrimEnd('\', '/')
+    } catch {
+        $resolvedProject
+    }
+    $canonProjWithSep = if ($canonProject.EndsWith($sep)) { $canonProject } else { $canonProject + $sep }
+
+    $inRoot = $combined.Equals($canonProject, [System.StringComparison]::OrdinalIgnoreCase) -or $combined.StartsWith($canonProjWithSep, [System.StringComparison]::OrdinalIgnoreCase)
+    if (-not $inRoot) {
         throw "Path traversal detected: target '$RelativeTarget' escapes project root '$ProjectDir'."
     }
+
+    # Canonicalize and verify that any existing ancestor does not escape via link or junction
+    $existing = $combined
+    while (-not [string]::IsNullOrWhiteSpace($existing) -and -not (Test-Path -LiteralPath $existing)) {
+        $parent = Split-Path -Parent $existing
+        if ($parent -eq $existing) { break }
+        $existing = $parent
+    }
+    if (-not [string]::IsNullOrWhiteSpace($existing) -and (Test-Path -LiteralPath $existing)) {
+        $canonExisting = try {
+            (Resolve-Path -LiteralPath $existing -ErrorAction Stop).ProviderPath.TrimEnd('\', '/')
+        } catch {
+            [System.IO.Path]::GetFullPath($existing).TrimEnd('\', '/')
+        }
+        $existingInRoot = $canonExisting.Equals($canonProject, [System.StringComparison]::OrdinalIgnoreCase) -or $canonExisting.StartsWith($canonProjWithSep, [System.StringComparison]::OrdinalIgnoreCase)
+        if (-not $existingInRoot) {
+            throw "Path traversal detected: target '$RelativeTarget' resolves outside project root '$ProjectDir' via link or junction."
+        }
+    }
+
     return $combined
 }
 

@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
-import { getMachineIdentity, samePath, checkoutIdentity } from '../src/devkit-engine.mjs';
+import { getMachineIdentity, samePath, checkoutIdentity, plan } from '../src/devkit-engine.mjs';
 
 const hash = data => createHash('sha256').update(data).digest('hex');
 
@@ -150,4 +150,146 @@ test('.gitattributes: policy enforces LF on code and content files', () => {
     assert.ok(attr.endsWith('eol: lf'), `Expected eol: lf for ${sample}, got: ${attr}`);
   }
 });
+
+test('cross-platform: targets normalize Windows backslashes while strictly rejecting escapes', t => {
+  const repoRoot = path.resolve(import.meta.dirname, '..');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-platform-targets-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+
+  execFileSync('git', ['init', '--quiet', base]);
+  execFileSync('git', ['-C', base, 'config', '--local', 'remote.origin.url', 'https://github.com/vimanoelkkj/chopp-delivery.git']);
+  fs.writeFileSync(path.join(base, 'package.json'), '{}');
+
+  // Valid target with Windows backslashes
+  const validManifest = {
+    profile: 'chopp-delivery',
+    skills: ['minimal-diff'],
+    targets: {
+      skills: ['.agents\\skills'],
+      hooks: ['.claude\\hooks']
+    }
+  };
+  fs.writeFileSync(path.join(base, 'agent-devkit.json'), JSON.stringify(validManifest));
+
+  const planned = plan({ devkitRoot: repoRoot, projectDir: base });
+  assert.ok(planned.state.length > 0);
+  assert.ok(planned.state.some(s => s.targetPath.includes('.agents')));
+
+  // Malicious target with path traversal using backslashes
+  const traversalManifest = {
+    profile: 'chopp-delivery',
+    skills: ['minimal-diff'],
+    targets: {
+      skills: ['..\\outside']
+    }
+  };
+  fs.writeFileSync(path.join(base, 'agent-devkit.json'), JSON.stringify(traversalManifest));
+  assert.throws(
+    () => plan({ devkitRoot: repoRoot, projectDir: base }),
+    /Unsafe path/
+  );
+
+  // Malicious target with drive letter
+  const driveManifest = {
+    profile: 'chopp-delivery',
+    skills: ['minimal-diff'],
+    targets: {
+      skills: ['C:\\outside']
+    }
+  };
+  fs.writeFileSync(path.join(base, 'agent-devkit.json'), JSON.stringify(driveManifest));
+  assert.throws(
+    () => plan({ devkitRoot: repoRoot, projectDir: base }),
+    /Unsafe path/
+  );
+
+  // Malicious target with UNC path
+  const uncManifest = {
+    profile: 'chopp-delivery',
+    skills: ['minimal-diff'],
+    targets: {
+      skills: ['\\\\server\\share']
+    }
+  };
+  fs.writeFileSync(path.join(base, 'agent-devkit.json'), JSON.stringify(uncManifest));
+  assert.throws(
+    () => plan({ devkitRoot: repoRoot, projectDir: base }),
+    /Unsafe path/
+  );
+});
+
+test('cross-platform: samePath and checkoutIdentity handle 8.3 short paths and CRLF parsing', t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-platform-crlf-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+
+  execFileSync('git', ['init', '--quiet', base]);
+  execFileSync('git', ['-C', base, 'config', '--local', 'remote.origin.url', 'https://github.com/vimanoelkkj/chopp-delivery.git']);
+  fs.writeFileSync(path.join(base, 'package.json'), '{}');
+
+  const canonical = fs.realpathSync(base);
+  // samePath on Windows accepts both exact and canonical realpaths
+  assert.equal(samePath(canonical, base, 'win32'), true);
+
+  // Test checkout identity creation with simulated Windows platform
+  const sampleGuid = 'a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d';
+  const checkout = checkoutIdentity(base, {
+    platform: 'win32',
+    winRegReader: () => `MachineGuid    REG_SZ    ${sampleGuid}`
+  });
+  assert.equal(checkout.identity.machine, hash(sampleGuid));
+  assert.equal(samePath(checkout.identity.projectDir, base, 'win32'), true);
+});
+
+test('adversarial: sibling directories with common prefix (chopp vs chopp-backup) cannot collide or escape', t => {
+  const repoRoot = path.resolve(import.meta.dirname, '..');
+  const tempParent = fs.mkdtempSync(path.join(os.tmpdir(), 'sibling-test-'));
+  const choppDir = path.join(tempParent, 'chopp');
+  const choppBackupDir = path.join(tempParent, 'chopp-backup');
+
+  fs.mkdirSync(choppDir, { recursive: true });
+  fs.mkdirSync(choppBackupDir, { recursive: true });
+  fs.writeFileSync(path.join(choppBackupDir, 'evil.txt'), 'payload');
+
+  t.after(() => fs.rmSync(tempParent, { recursive: true, force: true }));
+
+  // samePath must strictly distinguish prefix collisions on both Linux and Windows
+  assert.equal(samePath(choppDir, choppBackupDir, 'linux'), false);
+  assert.equal(samePath(choppDir, choppBackupDir, 'win32'), false);
+  assert.equal(samePath('C:\\app\\chopp', 'C:\\app\\chopp-backup', 'win32'), false);
+  assert.equal(samePath('C:\\app\\chopp', 'c:\\app\\chopp-backup', 'win32'), false);
+
+  // Initializing git in choppDir
+  execFileSync('git', ['init', '--quiet', choppDir]);
+  execFileSync('git', ['-C', choppDir, 'config', '--local', 'remote.origin.url', 'https://github.com/vimanoelkkj/chopp-delivery.git']);
+  fs.writeFileSync(path.join(choppDir, 'package.json'), '{}');
+
+  // Manifest targeting sibling directory with forward slashes
+  const siblingManifest = {
+    profile: 'chopp-delivery',
+    skills: ['minimal-diff'],
+    targets: {
+      skills: ['../chopp-backup']
+    }
+  };
+  fs.writeFileSync(path.join(choppDir, 'agent-devkit.json'), JSON.stringify(siblingManifest));
+  assert.throws(
+    () => plan({ devkitRoot: repoRoot, projectDir: choppDir }),
+    /Unsafe path/
+  );
+
+  // Manifest targeting sibling directory with Windows backslashes
+  const siblingBackslashManifest = {
+    profile: 'chopp-delivery',
+    skills: ['minimal-diff'],
+    targets: {
+      skills: ['..\\chopp-backup']
+    }
+  };
+  fs.writeFileSync(path.join(choppDir, 'agent-devkit.json'), JSON.stringify(siblingBackslashManifest));
+  assert.throws(
+    () => plan({ devkitRoot: repoRoot, projectDir: choppDir }),
+    /Unsafe path/
+  );
+});
+
 

@@ -202,9 +202,11 @@ test('rejects hardlinks and FIFOs without reading or blocking', t => {
   put(f.target, 'local');
   fs.linkSync(f.target, path.join(f.root, 'hardlink'));
   assert.throws(() => sync(f.options), /hardlink/);
-  fs.unlinkSync(f.target);
-  execFileSync('mkfifo', [f.target]);
-  assert.throws(() => sync(f.options), /special file/);
+  if (process.platform !== 'win32') {
+    fs.unlinkSync(f.target);
+    execFileSync('mkfifo', [f.target]);
+    assert.throws(() => sync(f.options), /special file/);
+  }
 });
 for (const resource of ['thirdPartySkills', 'thirdParty', 'hooks', 'instructions', 'rules', 'agents', 'configs', 'overlays']) {
   test(`fails explicitly for unsupported ${resource}`, t => {

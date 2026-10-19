@@ -17,11 +17,17 @@ function name(value) {
   return value;
 }
 function relative(value) {
-  if (typeof value !== 'string' || !value || value.includes('\\') || value.includes(':') ||
-      value.includes('\0') || path.posix.isAbsolute(value) || value.split('/').some(p => !p || p === '.' || p === '..')) {
+  if (typeof value !== 'string' || !value || value.includes('\0') || value.includes(':')) {
     fail(`Unsafe path: ${value}`);
   }
-  return value;
+  if (value.startsWith('\\\\') || value.startsWith('//')) {
+    fail(`Unsafe path: ${value}`);
+  }
+  const normalized = value.replace(/\\/g, '/');
+  if (path.posix.isAbsolute(normalized) || normalized.split('/').some(p => !p || p === '.' || p === '..')) {
+    fail(`Unsafe path: ${value}`);
+  }
+  return normalized;
 }
 function stat(file) {
   try { return fs.lstatSync(file); } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
@@ -43,7 +49,16 @@ function safe(file, kind = 'file') {
   }
   return absolute;
 }
-function inside(root, rel, kind) { return safe(path.join(root, relative(rel)), kind); }
+function inside(root, rel, kind) {
+  const cleanRel = relative(rel);
+  const resolvedRoot = path.resolve(root);
+  const target = safe(path.join(resolvedRoot, cleanRel), kind);
+  const rootWithSep = resolvedRoot.endsWith(path.sep) ? resolvedRoot : resolvedRoot + path.sep;
+  if (!target.startsWith(rootWithSep) && target !== resolvedRoot) {
+    fail(`Path traversal detected: target escapes root ${root}`);
+  }
+  return target;
+}
 function read(file) {
   safe(file);
   if (!stat(file)) return null;
@@ -104,7 +119,11 @@ function originRepository(projectDir) {
 export function samePath(a, b, platform = process.platform) {
   if (a === b) return true;
   if (platform === 'win32') {
-    return path.win32.resolve(a).toLowerCase() === path.win32.resolve(b).toLowerCase();
+    let ra = a;
+    let rb = b;
+    try { ra = fs.realpathSync(a); } catch {}
+    try { rb = fs.realpathSync(b); } catch {}
+    return path.win32.resolve(ra).toLowerCase() === path.win32.resolve(rb).toLowerCase();
   }
   return false;
 }
@@ -144,13 +163,14 @@ export function checkoutIdentity(projectDir, options = {}) {
   if (!stat(dotGit)) fail('Checkout state requires a Git checkout root');
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
   env.GIT_CONFIG_NOSYSTEM = '1';
-  env.GIT_CONFIG_GLOBAL = '/dev/null';
+  env.GIT_CONFIG_GLOBAL = (options.platform ?? process.platform) === 'win32' ? 'NUL' : '/dev/null';
   const values = execFileSync('git', ['-C', projectDir, '-c', 'core.hooksPath=/dev/null',
     'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir', '--git-common-dir'],
-    { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] }).trimEnd().split('\n');
+    { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] }).trimEnd().split(/\r?\n/);
   if (values.length !== 3) fail('Invalid Git checkout identity');
-  const [top, gitDir, commonDir] = values.map(value => fs.realpathSync(safe(value, 'directory')));
-  if (!samePath(top, projectDir, options.platform)) fail('Project directory must be the Git checkout root');
+  const [top, gitDir, commonDir] = values.map(value => fs.realpathSync(safe(value.trim(), 'directory')));
+  const canonicalProject = fs.realpathSync(safe(projectDir, 'directory'));
+  if (!samePath(top, canonicalProject, options.platform)) fail('Project directory must be the Git checkout root');
   for (const dir of new Set([gitDir, commonDir])) {
     for (const file of ['config', 'config.worktree', 'commondir', 'gitdir']) safe(path.join(dir, file));
   }
@@ -226,14 +246,14 @@ export function plan({ devkitRoot, projectDir, profile: selectedProfile, manifes
     hookTargets = array(manifest.targets ?? {}, 'hooks');
   }
   if (!targets.length) targets = targetsAllowed;
-  targets = [...new Set(targets)];
+  targets = [...new Set(targets.map(t => typeof t === 'string' ? t.replace(/\\/g, '/') : t))];
   for (const target of targets) {
     relative(target);
     if (!targetsAllowed.includes(target)) fail(`Unsupported Skills target: ${target}`);
     if (requested.length) inside(projectDir, target, 'directory');
   }
   if (!hookTargets.length) hookTargets = ['.claude/hooks'];
-  hookTargets = [...new Set(hookTargets)];
+  hookTargets = [...new Set(hookTargets.map(t => typeof t === 'string' ? t.replace(/\\/g, '/') : t))];
   for (const target of hookTargets) {
     relative(target);
     if (target !== '.claude/hooks') fail(`Unsupported Hooks target: ${target}`);
