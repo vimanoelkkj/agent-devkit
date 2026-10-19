@@ -47,7 +47,7 @@ function editLock(options, edit) {
 test('two checkouts have independent baselines, hashes and updates', t => {
   const f = fixture(t), a = sync(f.a), b = sync(f.b);
   assert.notEqual(a.lockPath, b.lockPath);
-  assert.match(a.lockPath, /state\/alpha\/checkouts\/[a-f0-9]{64}\/agent-devkit.lock$/);
+  assert.match(a.lockPath.replace(/\\/g, '/'), /state\/alpha\/checkouts\/[a-f0-9]{64}\/agent-devkit.lock$/);
   const beforeB = tree(f.b.projectDir), lockB = fs.readFileSync(b.lockPath);
   put(f.source, '# v2\n');
   assert.equal(sync(f.a).written, 2);
