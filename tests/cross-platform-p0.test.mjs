@@ -9,7 +9,7 @@ import { getMachineIdentity, samePath, checkoutIdentity, plan } from '../src/dev
 
 const hash = data => createHash('sha256').update(data).digest('hex');
 
-test('getMachineIdentity: Linux native read returns valid SHA-256 matching /etc/machine-id', () => {
+test('getMachineIdentity: Linux native read returns valid SHA-256 matching /etc/machine-id', { skip: process.platform !== 'linux' }, () => {
   const machine = getMachineIdentity({ platform: 'linux' });
   assert.equal(typeof machine, 'string');
   assert.equal(machine.length, 64);

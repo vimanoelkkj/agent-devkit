@@ -105,11 +105,18 @@ export function profileShow(devkitRoot, profileName) {
   if (!profile || profile.name !== profileName) fail(`Profile not found or name mismatch: ${profileName}`);
   return profile;
 }
+function nativeRealpath(file) {
+  try {
+    return fs.realpathSync.native ? fs.realpathSync.native(file) : fs.realpathSync(file);
+  } catch {
+    return fs.realpathSync(file);
+  }
+}
 function originRepository(projectDir) {
   // Git config is read-only; no checkout, network, hooks, aliases or project code.
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
   env.GIT_CONFIG_NOSYSTEM = '1';
-  env.GIT_CONFIG_GLOBAL = '/dev/null';
+  env.GIT_CONFIG_GLOBAL = process.platform === 'win32' ? 'NUL' : '/dev/null';
   const origin = execFileSync('git', ['-C', projectDir, '-c', 'core.hooksPath=/dev/null',
     'config', '--local', '--no-includes', '--get', 'remote.origin.url'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   const match = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(origin);
@@ -121,8 +128,8 @@ export function samePath(a, b, platform = process.platform) {
   if (platform === 'win32') {
     let ra = a;
     let rb = b;
-    try { ra = fs.realpathSync(a); } catch {}
-    try { rb = fs.realpathSync(b); } catch {}
+    try { ra = nativeRealpath(a); } catch {}
+    try { rb = nativeRealpath(b); } catch {}
     return path.win32.resolve(ra).toLowerCase() === path.win32.resolve(rb).toLowerCase();
   }
   return false;
@@ -168,8 +175,8 @@ export function checkoutIdentity(projectDir, options = {}) {
     'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir', '--git-common-dir'],
     { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] }).trimEnd().split(/\r?\n/);
   if (values.length !== 3) fail('Invalid Git checkout identity');
-  const [top, gitDir, commonDir] = values.map(value => fs.realpathSync(safe(value.trim(), 'directory')));
-  const canonicalProject = fs.realpathSync(safe(projectDir, 'directory'));
+  const [top, gitDir, commonDir] = values.map(value => nativeRealpath(safe(value.trim(), 'directory')));
+  const canonicalProject = nativeRealpath(safe(projectDir, 'directory'));
   if (!samePath(top, canonicalProject, options.platform)) fail('Project directory must be the Git checkout root');
   for (const dir of new Set([gitDir, commonDir])) {
     for (const file of ['config', 'config.worktree', 'commondir', 'gitdir']) safe(path.join(dir, file));
