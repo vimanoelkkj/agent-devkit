@@ -26,6 +26,92 @@ function Get-DevKitSha256 {
     return $hash.Hash.ToLowerInvariant()
 }
 
+if ($IsWindows -or ($env:OS -like "*Windows*")) {
+    try {
+        if (-not ('DevKitWin32Path' -as [type])) {
+            Add-Type -TypeDefinition @"
+            using System;
+            using System.Text;
+            using System.Runtime.InteropServices;
+            public static class DevKitWin32Path {
+                [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+                public static extern uint GetLongPathName(string lpszShortPath, StringBuilder lpszLongPath, uint cchBuffer);
+
+                public static string GetLongPath(string path) {
+                    if (string.IsNullOrEmpty(path)) return path;
+                    StringBuilder sb = new StringBuilder(1024);
+                    uint res = GetLongPathName(path, sb, (uint)sb.Capacity);
+                    if (res > sb.Capacity) {
+                        sb.Capacity = (int)res;
+                        res = GetLongPathName(path, sb, (uint)sb.Capacity);
+                    }
+                    if (res > 0) {
+                        string s = sb.ToString();
+                        if (s.StartsWith(@"\\?\")) return s.Substring(4);
+                        if (s.StartsWith(@"\??\")) return s.Substring(4);
+                        return s;
+                    }
+                    return path;
+                }
+            }
+"@ -ErrorAction SilentlyContinue
+        }
+    } catch {}
+}
+
+function Resolve-DevKitCanonicalPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $Path }
+
+    $sep = [System.IO.Path]::DirectorySeparatorChar
+
+    if (Test-Path -LiteralPath $Path) {
+        if (-not ($IsWindows -or ($env:OS -like "*Windows*"))) {
+            $real = try { (& realpath $Path 2>$null).Trim() } catch { $null }
+            if ($real) { return $real }
+            return (Resolve-Path -LiteralPath $Path).ProviderPath
+        } else {
+            try {
+                if ('DevKitWin32Path' -as [type]) {
+                    $long = [DevKitWin32Path]::GetLongPath($Path)
+                    if ($long) {
+                        return (Resolve-Path -LiteralPath $long).ProviderPath
+                    }
+                }
+            } catch {}
+            return (Resolve-Path -LiteralPath $Path).ProviderPath
+        }
+    }
+
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $curr = $full
+    $tailParts = [System.Collections.Generic.List[string]]::new()
+
+    while (-not [string]::IsNullOrWhiteSpace($curr) -and -not (Test-Path -LiteralPath $curr)) {
+        $parent = Split-Path -Parent $curr
+        $leaf = Split-Path -Leaf $curr
+        if ($parent -eq $curr -or [string]::IsNullOrWhiteSpace($leaf)) { break }
+        $tailParts.Insert(0, $leaf)
+        $curr = $parent
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($curr) -and (Test-Path -LiteralPath $curr)) {
+        $canonAncestor = Resolve-DevKitCanonicalPath -Path $curr
+        if ($tailParts.Count -gt 0) {
+            $tail = [string]::Join($sep, $tailParts)
+            return (Join-Path $canonAncestor $tail)
+        }
+        return $canonAncestor
+    }
+
+    return $full
+}
+
 function Test-DevKitSamePath {
     [CmdletBinding()]
     param(
@@ -37,14 +123,12 @@ function Test-DevKitSamePath {
     )
 
     if ($PathA -eq $PathB -or $PathA.TrimEnd('\', '/') -eq $PathB.TrimEnd('\', '/')) { return $true }
-    $realA = try { (Resolve-Path -LiteralPath $PathA -ErrorAction Stop).ProviderPath } catch { [System.IO.Path]::GetFullPath($PathA) }
-    $realB = try { (Resolve-Path -LiteralPath $PathB -ErrorAction Stop).ProviderPath } catch { [System.IO.Path]::GetFullPath($PathB) }
-    $fullA = $realA.TrimEnd('\', '/')
-    $fullB = $realB.TrimEnd('\', '/')
+    $canonA = (Resolve-DevKitCanonicalPath -Path $PathA).TrimEnd('\', '/')
+    $canonB = (Resolve-DevKitCanonicalPath -Path $PathB).TrimEnd('\', '/')
     if ($IsWindows -or ($env:OS -like "*Windows*")) {
-        return $fullA.ToLowerInvariant() -eq $fullB.ToLowerInvariant()
+        return $canonA.ToLowerInvariant() -eq $canonB.ToLowerInvariant()
     } else {
-        return $fullA -eq $fullB
+        return $canonA -eq $canonB
     }
 }
 
@@ -188,9 +272,9 @@ function Get-DevKitCheckoutIdentity {
         }
     }
 
-    $top = if (-not ($IsWindows -or ($env:OS -like "*Windows*"))) { (& realpath $topRaw 2>$null).Trim() } else { (Resolve-Path -LiteralPath $topRaw).ProviderPath }
-    $gitDir = if (-not ($IsWindows -or ($env:OS -like "*Windows*"))) { (& realpath $gitDirRaw 2>$null).Trim() } else { (Resolve-Path -LiteralPath $gitDirRaw).ProviderPath }
-    $commonDir = if (-not ($IsWindows -or ($env:OS -like "*Windows*"))) { (& realpath $commonDirRaw 2>$null).Trim() } else { (Resolve-Path -LiteralPath $commonDirRaw).ProviderPath }
+    $top = Resolve-DevKitCanonicalPath -Path $topRaw
+    $gitDir = Resolve-DevKitCanonicalPath -Path $gitDirRaw
+    $commonDir = Resolve-DevKitCanonicalPath -Path $commonDirRaw
 
     if (-not (Test-DevKitSamePath $top $ProjectDir)) {
         throw "Project directory must be the Git checkout root"
@@ -323,21 +407,12 @@ function Test-DevKitSafeTargetPath {
         throw "Path traversal detected: target '$RelativeTarget' contains invalid navigation segments."
     }
 
-    $resolvedProject = try {
-        (Resolve-Path -LiteralPath $ProjectDir -ErrorAction Stop).ProviderPath.TrimEnd('\', '/')
-    } catch {
-        [System.IO.Path]::GetFullPath($ProjectDir).TrimEnd('\', '/')
-    }
+    $canonProject = (Resolve-DevKitCanonicalPath -Path $ProjectDir).TrimEnd('\', '/')
+    $canonProjWithSep = $canonProject + $sep
 
     $cleanRel = $normRel.Replace('/', $sep)
-    $combined = [System.IO.Path]::GetFullPath((Join-Path $resolvedProject $cleanRel))
-
-    $canonProject = try {
-        (Resolve-Path -LiteralPath $resolvedProject -ErrorAction Stop).ProviderPath.TrimEnd('\', '/')
-    } catch {
-        $resolvedProject
-    }
-    $canonProjWithSep = if ($canonProject.EndsWith($sep)) { $canonProject } else { $canonProject + $sep }
+    $combinedRaw = [System.IO.Path]::GetFullPath((Join-Path $canonProject $cleanRel))
+    $combined = (Resolve-DevKitCanonicalPath -Path $combinedRaw).TrimEnd('\', '/')
 
     $inRoot = $combined.Equals($canonProject, [System.StringComparison]::OrdinalIgnoreCase) -or $combined.StartsWith($canonProjWithSep, [System.StringComparison]::OrdinalIgnoreCase)
     if (-not $inRoot) {
@@ -352,11 +427,7 @@ function Test-DevKitSafeTargetPath {
         $existing = $parent
     }
     if (-not [string]::IsNullOrWhiteSpace($existing) -and (Test-Path -LiteralPath $existing)) {
-        $canonExisting = try {
-            (Resolve-Path -LiteralPath $existing -ErrorAction Stop).ProviderPath.TrimEnd('\', '/')
-        } catch {
-            [System.IO.Path]::GetFullPath($existing).TrimEnd('\', '/')
-        }
+        $canonExisting = (Resolve-DevKitCanonicalPath -Path $existing).TrimEnd('\', '/')
         $existingInRoot = $canonExisting.Equals($canonProject, [System.StringComparison]::OrdinalIgnoreCase) -or $canonExisting.StartsWith($canonProjWithSep, [System.StringComparison]::OrdinalIgnoreCase)
         if (-not $existingInRoot) {
             throw "Path traversal detected: target '$RelativeTarget' resolves outside project root '$ProjectDir' via link or junction."
@@ -2727,6 +2798,7 @@ Export-ModuleMember -Function `
     Get-DevKitMachineId, `
     Get-DevKitFileStamp, `
     Get-DevKitCheckoutIdentity, `
+    Resolve-DevKitCanonicalPath, `
     Test-DevKitSafeTargetPath, `
     Resolve-DevKitComponent, `
     Resolve-DevKitFileComponent, `

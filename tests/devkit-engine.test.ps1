@@ -685,6 +685,21 @@ try {
         Remove-Item -Path $siblingPath -Recurse -Force -ErrorAction SilentlyContinue
     }
 
+    # 8.3 alias and canonicalization regression tests
+    $canonDirect = Resolve-DevKitCanonicalPath -Path $sandboxPhaseA2
+    Assert-Equal (-not [string]::IsNullOrWhiteSpace($canonDirect)) $true "Resolve-DevKitCanonicalPath returns non-empty path"
+    Assert-Equal (Test-DevKitSamePath $sandboxPhaseA2 $canonDirect) $true "Test-DevKitSamePath equates path with its canonical resolution"
+
+    # Non-existent subfile under project canonicalizes inside project
+    $nonExistentSub = Join-Path $sandboxPhaseA2 "non-existent-sub\target-file.txt"
+    $canonSub = Resolve-DevKitCanonicalPath -Path $nonExistentSub
+    Assert-Equal ($canonSub.StartsWith($canonDirect)) $true "Non-existent subfile canonicalizes within project root"
+
+    # Test-DevKitSafeTargetPath with valid subtarget
+    $safeResolved = Test-DevKitSafeTargetPath -ProjectDir $sandboxPhaseA2 -RelativeTarget "valid\nested\file.txt"
+    Assert-Equal ($safeResolved.StartsWith($canonDirect)) $true "Test-DevKitSafeTargetPath accepts valid non-existent target"
+
+
     # 14.12 Custom overlays & profile isolation test
     $isoProfileDir = Join-Path $devKitRoot "profiles\test-isolation-profile"
     New-Item -ItemType Directory -Path (Join-Path $isoProfileDir "overlays") -Force | Out-Null
