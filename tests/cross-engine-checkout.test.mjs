@@ -80,8 +80,11 @@ test('Cross-engine verify: both engines verify Chopp Delivery with 100% equivale
     stateScope: 'checkout'
   });
   assert.equal(nodeResult.verified, true);
-  assert.equal(nodeResult.state.length, 8);
+  assert.equal(nodeResult.state.length, 11);
   assert.ok(nodeResult.state.every(s => s.status === 'synced'));
+  const nodeInstructions = nodeResult.state.filter(s => s.type === 'instruction');
+  assert.equal(nodeInstructions.length, 3);
+  assert.deepEqual(nodeInstructions.map(s => s.file).sort(), ['AGENTS.md', 'AI_RULES.md', 'CLAUDE.md']);
 
   const pwshTargetDir = targetDir.replace(/\\/g, '/');
   const pwshDevkitRoot = devkitRoot.replace(/\\/g, '/');
@@ -98,7 +101,7 @@ test('Cross-engine verify: both engines verify Chopp Delivery with 100% equivale
   const pwshParsed = JSON.parse(pwshOut);
 
   assert.equal(pwshParsed.Verified, true);
-  assert.equal(pwshParsed.TotalFiles, 8);
+  assert.equal(pwshParsed.TotalFiles, 11);
   assert.equal(pwshParsed.DiscrepanciesCount, 0);
 });
 
@@ -346,7 +349,10 @@ test('Mutual interop: Node sync creates lockfile -> PowerShell verify validates 
     stateScope: 'checkout'
   });
   assert.equal(syncResult.blocked, false);
-  assert.equal(syncResult.written, 8);
+  assert.equal(syncResult.written, 11);
+  for (const md of ['AGENTS.md', 'AI_RULES.md', 'CLAUDE.md']) {
+    assert.ok(fs.existsSync(path.join(sandbox, md)), `Expected ${md} to be materialized`);
+  }
 
   const pwshSandbox = sandbox.replace(/\\/g, '/');
   const pwshDevkitRoot = devkitRoot.replace(/\\/g, '/');
@@ -363,7 +369,7 @@ test('Mutual interop: Node sync creates lockfile -> PowerShell verify validates 
   const pwshOut = runPwsh(pwshScript);
   const pwshParsed = JSON.parse(pwshOut);
   assert.equal(pwshParsed.Verified, true);
-  assert.equal(pwshParsed.TotalFiles, 8);
+  assert.equal(pwshParsed.TotalFiles, 11);
   assert.equal(pwshParsed.DiscrepanciesCount, 0);
 });
 
@@ -394,7 +400,10 @@ test('Mutual interop: PowerShell sync creates lockfile -> Node verify validates 
   const pwshOut = runPwsh(pwshScript);
   const pwshParsed = JSON.parse(pwshOut);
   assert.equal(pwshParsed.Blocked, 0);
-  assert.equal(pwshParsed.Materialized, 8);
+  assert.equal(pwshParsed.Materialized, 11);
+  for (const md of ['AGENTS.md', 'AI_RULES.md', 'CLAUDE.md']) {
+    assert.ok(fs.existsSync(path.join(sandbox, md)), `Expected ${md} to be materialized by PowerShell`);
+  }
 
   const nodeResult = verify({
     devkitRoot: mockDevKit,
@@ -403,8 +412,11 @@ test('Mutual interop: PowerShell sync creates lockfile -> Node verify validates 
     stateScope: 'checkout'
   });
   assert.equal(nodeResult.verified, true);
-  assert.equal(nodeResult.state.length, 8);
+  assert.equal(nodeResult.state.length, 11);
   assert.ok(nodeResult.state.every(s => s.status === 'synced'));
+  const nodeInstructions = nodeResult.state.filter(s => s.type === 'instruction');
+  assert.equal(nodeInstructions.length, 3);
+  assert.deepEqual(nodeInstructions.map(s => s.file).sort(), ['AGENTS.md', 'AI_RULES.md', 'CLAUDE.md']);
 });
 
 test('Concurrent guard: active checkout sync guard blocks both engines and is preserved on failure', t => {
