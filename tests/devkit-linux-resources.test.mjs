@@ -401,3 +401,27 @@ for (const producer of ['Node', 'PowerShell']) {
     assert.equal(fs.existsSync(f.sentinel), false);
   });
 }
+
+test('AI_RULES.md is a supported instruction alongside AGENTS.md and CLAUDE.md', t => {
+  const f = fixture(t);
+  put(path.join(f.devkitRoot, 'profiles/alpha/instructions/AI_RULES.md'), '# AI Rules\n');
+  f.update({ instructions: ['AGENTS.md', 'CLAUDE.md', 'AI_RULES.md'] });
+  const result = sync(f.options);
+  assert.equal(result.written, 6);
+  assert.equal(fs.existsSync(path.join(f.projectDir, 'AI_RULES.md')), true);
+  assert.equal(fs.readFileSync(path.join(f.projectDir, 'AI_RULES.md'), 'utf8'), '# AI Rules\n');
+  assert.equal(verify(f.options).verified, true);
+  const lock = locked(f);
+  assert.equal(lock.instructions['AI_RULES.md'].source, 'profile:alpha');
+  assert.equal(lock.instructions['AI_RULES.md'].sha256, digest(Buffer.from('# AI Rules\n')));
+
+  // Unmanaged AI_RULES.md blocks sync and is never adopted
+  const f2 = fixture(t);
+  put(path.join(f2.devkitRoot, 'profiles/alpha/instructions/AI_RULES.md'), '# AI Rules\n');
+  f2.update({ instructions: ['AGENTS.md', 'CLAUDE.md', 'AI_RULES.md'] });
+  put(path.join(f2.projectDir, 'AI_RULES.md'), '# existing untracked content\n');
+  const result2 = sync(f2.options);
+  assert.equal(result2.blocked, true);
+  assert.equal(result2.state.find(s => s.target === 'AI_RULES.md').status, 'untracked');
+  assert.equal(fs.readFileSync(path.join(f2.projectDir, 'AI_RULES.md'), 'utf8'), '# existing untracked content\n');
+});

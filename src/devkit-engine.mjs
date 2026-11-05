@@ -95,7 +95,7 @@ function supported(o) {
 }
 function resourceName(section, value) {
   relative(value);
-  if (section === 'instructions' ? !['AGENTS.md', 'CLAUDE.md'].includes(value) :
+  if (section === 'instructions' ? !['AGENTS.md', 'CLAUDE.md', 'AI_RULES.md'].includes(value) :
     !/^[a-zA-Z0-9][a-zA-Z0-9_-]*\.mjs$/.test(value)) fail(`Unsupported ${section} name: ${value}`);
   return value;
 }

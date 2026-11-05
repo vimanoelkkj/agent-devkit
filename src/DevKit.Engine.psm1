@@ -323,6 +323,24 @@ function Get-DevKitCheckoutIdentity {
     }
 }
 
+function Get-DevKitRelativePath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RelativeDir,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath
+    )
+    $getMethod = [System.IO.Path].GetMethod("GetRelativePath", [type[]]@([string], [string]))
+    if ($null -ne $getMethod) {
+        return [System.IO.Path]::GetRelativePath($RelativeDir, $FilePath)
+    }
+    $canonDir = $RelativeDir.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    $fromUri = [System.Uri]$canonDir
+    $toUri = [System.Uri]$FilePath
+    return [System.Uri]::UnescapeDataString($fromUri.MakeRelativeUri($toUri).ToString()).Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+}
+
 function Resolve-DevKitComponent {
     [CmdletBinding()]
     param(
@@ -359,7 +377,7 @@ function Resolve-DevKitComponent {
     $canonDir = (Resolve-DevKitCanonicalPath -Path $resolvedDir).TrimEnd('\', '/')
     foreach ($file in $allFiles) {
         $canonFile = (Resolve-DevKitCanonicalPath -Path $file.FullName)
-        $relPath = [System.IO.Path]::GetRelativePath($canonDir, $canonFile).Replace('\', '/')
+        $relPath = (Get-DevKitRelativePath -RelativeDir $canonDir -FilePath $canonFile).Replace('\', '/')
         $hash = Get-DevKitSha256 -Path $file.FullName
         $files[$relPath] = @{
             sha256 = $hash
@@ -1369,7 +1387,7 @@ function Fetch-DevKitThirdParty {
 
         foreach ($file in $subpathFiles) {
             $canonFile = (Resolve-DevKitCanonicalPath -Path $file.FullName)
-            $relPath = [System.IO.Path]::GetRelativePath($canonSubpath, $canonFile).Replace('\', '/')
+            $relPath = (Get-DevKitRelativePath -RelativeDir $canonSubpath -FilePath $canonFile).Replace('\', '/')
             $hash = Get-DevKitSha256 -Path $file.FullName
             $files[$relPath] = @{
                 sha256     = $hash

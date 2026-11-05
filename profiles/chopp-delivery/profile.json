@@ -10,7 +10,11 @@
   ],
   "thirdPartySkills": [],
   "hooks": [],
-  "instructions": [],
+  "instructions": [
+    "AGENTS.md",
+    "AI_RULES.md",
+    "CLAUDE.md"
+  ],
   "rules": [],
   "agents": [],
   "configs": [],

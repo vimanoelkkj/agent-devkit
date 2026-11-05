@@ -21,6 +21,8 @@ function fixture(t, { manifest = true, chopp = false } = {}) {
   const profileData = chopp ? profileShow(repository, profile) : { name: profile, version: '1.0.0', skills: ['minimal-diff'], targets: { skills: ['.agents/skills'] } };
   put(path.join(devkitRoot, 'profiles', profile, 'profile.json'), JSON.stringify(profileData));
   for (const skill of profileData.skills) fs.cpSync(path.join(repository, 'core/skills', skill), path.join(devkitRoot, 'core/skills', skill), { recursive: true });
+  const instDir = path.join(repository, 'profiles', profile, 'instructions');
+  if (fs.existsSync(instDir)) fs.cpSync(instDir, path.join(devkitRoot, 'profiles', profile, 'instructions'), { recursive: true });
   const data = { ...profileData, profile };
   if (manifest) put(path.join(projectDir, 'agent-devkit.json'), JSON.stringify(data));
   const options = { devkitRoot, projectDir, profile };
@@ -322,16 +324,19 @@ test('Chopp profile is exclusive, has exactly four core Skills and installs no C
   assert.throws(() => sync(f.options), /exclusive/);
   assert.deepEqual(snapshot(f.root), before);
   f.origin('git@github.com:vimanoelkkj/chopp-delivery.git');
-  assert.equal(sync(f.options).written, 8);
+  assert.equal(sync(f.options).written, 11);
   assert.equal(verify(f.options).verified, true);
   assert.equal(fs.existsSync(path.join(f.projectDir, '.claude/hooks')), false);
-  assert.deepEqual(p.instructions, []);
+  assert.deepEqual(p.instructions, ['AGENTS.md', 'AI_RULES.md', 'CLAUDE.md']);
+  for (const item of ['AGENTS.md', 'AI_RULES.md', 'CLAUDE.md']) {
+    assert.equal(fs.existsSync(path.join(f.projectDir, item)), true);
+  }
 });
 for (const origin of ['https://github.com/vimanoelkkj/chopp-delivery.git', 'ssh://git@github.com/vimanoelkkj/chopp-delivery.git', 'https://github.com/vimanoelkkj/chopp-delivery']) {
   test(`accepts exact GitHub origin ${origin}`, t => {
     const f = fixture(t, { chopp: true });
     f.origin(origin);
-    assert.equal(plan(f.options).state.length, 8);
+    assert.equal(plan(f.options).state.length, 11);
   });
 }
 test('CLI profile show, read-only dry-run, verify exit codes and unsupported options', t => {
